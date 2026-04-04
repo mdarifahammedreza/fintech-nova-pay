@@ -1,0 +1,38 @@
+import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { AccountsModule } from '../accounts/accounts.module';
+import { LedgerModule } from '../ledger/ledger.module';
+import { CreatePaymentHandler } from './command/handlers/create-payment.handler';
+import { PaymentsController } from './controller/payments.controller';
+import { IdempotencyRecord } from './entities/idempotency-record.entity';
+import { Payment } from './entities/payment.entity';
+import { GetPaymentByIdHandler } from './query/handlers/get-payment-by-id.handler';
+import { GetPaymentByReferenceHandler } from './query/handlers/get-payment-by-reference.handler';
+import { IdempotencyRecordRepository } from './repositories/idempotency-record.repository';
+import { PaymentRepository } from './repositories/payment.repository';
+import { PaymentOrchestratorService } from './service/payment-orchestrator.service';
+import { PaymentsService } from './service/payments.service';
+
+/**
+ * Payments bounded context — HTTP via handlers; ledger/accounts only through
+ * their exported services.
+ */
+@Module({
+  imports: [
+    TypeOrmModule.forFeature([Payment, IdempotencyRecord]),
+    AccountsModule,
+    LedgerModule,
+  ],
+  controllers: [PaymentsController],
+  providers: [
+    PaymentRepository,
+    IdempotencyRecordRepository,
+    PaymentsService,
+    PaymentOrchestratorService,
+    CreatePaymentHandler,
+    GetPaymentByIdHandler,
+    GetPaymentByReferenceHandler,
+  ],
+  exports: [PaymentsService, PaymentOrchestratorService],
+})
+export class PaymentsModule {}

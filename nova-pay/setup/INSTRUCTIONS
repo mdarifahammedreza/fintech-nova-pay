@@ -1,0 +1,20 @@
+NovaPay — local setup (plain text; extend this file instead of adding new .md)
+
+PostgreSQL (primary + read replicas):
+  From repo root: cd infra/postgres
+  From nova-pay:   cd ../infra/postgres
+  cp .env.example .env && docker compose up -d
+
+App env:
+  Copy nova-pay/.env.example to .env when you add one; set DATABASE_WRITE_URL and
+  DATABASE_READ_URL to match Docker ports (see infra/postgres README).
+
+Run API:
+  cd nova-pay && yarn install && yarn start:dev
+
+Swagger:
+  http://localhost:3000/api (default PORT=3000)
+
+Architecture rules for agents:
+  .cursor/rules/nova-architecture.md
+  .cursor/rules/global.md

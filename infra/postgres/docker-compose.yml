@@ -1,0 +1,109 @@
+services:
+  postgres-primary:
+    image: postgres:16-alpine
+    container_name: postgres-primary
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fintech}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-fintech}
+      POSTGRES_REPLICATION_PASSWORD: ${POSTGRES_REPLICATION_PASSWORD:?Set POSTGRES_REPLICATION_PASSWORD in .env}
+    volumes:
+      - primary_data:/var/lib/postgresql/data
+      - ./init-primary:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${POSTGRES_PRIMARY_PORT:-5432}:5432"
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=5
+      - -c
+      - hot_standby=on
+      - -c
+      - listen_addresses=*
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - postgres-cqrs
+
+  postgres-read-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.replica
+    container_name: postgres-read-1
+    environment:
+      PRIMARY_HOST: postgres-primary
+      POSTGRES_USER: ${POSTGRES_USER:-fintech}
+      POSTGRES_DB: ${POSTGRES_DB:-fintech}
+      POSTGRES_REPLICATION_PASSWORD: ${POSTGRES_REPLICATION_PASSWORD:?Set POSTGRES_REPLICATION_PASSWORD in .env}
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - read1_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_READ1_PORT:-5433}:5432"
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - postgres-cqrs
+
+  postgres-read-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.replica
+    container_name: postgres-read-2
+    environment:
+      PRIMARY_HOST: postgres-primary
+      POSTGRES_USER: ${POSTGRES_USER:-fintech}
+      POSTGRES_DB: ${POSTGRES_DB:-fintech}
+      POSTGRES_REPLICATION_PASSWORD: ${POSTGRES_REPLICATION_PASSWORD:?Set POSTGRES_REPLICATION_PASSWORD in .env}
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - read2_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_READ2_PORT:-5434}:5432"
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - postgres-cqrs
+
+volumes:
+  primary_data:
+  read1_data:
+  read2_data:
+
+networks:
+  postgres-cqrs:
+    driver: bridge
