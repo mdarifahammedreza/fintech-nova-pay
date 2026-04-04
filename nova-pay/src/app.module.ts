@@ -9,6 +9,7 @@ import { AccountsModule } from './modules/accounts/accounts.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { LedgerModule } from './modules/ledger/ledger.module';
 import { PaymentsModule } from './modules/payments/payments.module';
+import { PayrollModule } from './modules/payroll/payroll.module';
 import { UsersModule } from './modules/users/users.module';
 
 type Importable =
@@ -40,6 +41,7 @@ const featureModules: Importable[] = [
   AccountsModule,
   LedgerModule,
   PaymentsModule,
+  PayrollModule,
 ];
 
 @Module({

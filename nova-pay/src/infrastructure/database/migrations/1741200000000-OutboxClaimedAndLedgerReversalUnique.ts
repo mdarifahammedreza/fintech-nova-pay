@@ -1,9 +1,10 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
- * Production DDL when `synchronize=false`:
- * - `CLAIMED` outbox status + `claimed_at` for relay reclaim
- * - partial unique index: one `REVERSAL` per `reverses_transaction_id`
+ * Production DDL when `synchronize=false` (idempotent).
+ * Reinforced by `1742000000000-EnsureOutboxEventsStatusEnumIncludesClaimed` and
+ * `1742000000100-PartialUniqueIndexLedgerReversalPerOriginal` for environments
+ * that need explicit reapplies.
  */
 export class OutboxClaimedAndLedgerReversalUnique1741200000000
   implements MigrationInterface
