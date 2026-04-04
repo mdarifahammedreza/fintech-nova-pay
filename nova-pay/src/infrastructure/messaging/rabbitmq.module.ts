@@ -5,6 +5,7 @@ import {
   MicroserviceOptions,
   Transport,
 } from '@nestjs/microservices';
+import { RabbitmqConfirmPublisherService } from './rabbitmq-confirm-publisher.service';
 import {
   RABBITMQ_CLIENT,
   RabbitmqService,
@@ -13,8 +14,9 @@ import {
 /**
  * Outbound RMQ client for async domain notifications.
  *
- * Post-commit publishing: `OutboxProcessorService` calls `RabbitmqService`
- * only after outbox rows are committed — never from controllers.
+ * Post-commit publishing: `OutboxProcessorService` uses
+ * `RabbitmqConfirmPublisherService` (publisher confirms) after outbox rows
+ * are committed — never from controllers.
  *
  * TODO: Inbound consumers: `app.connectMicroservice(createRmqInboundOptions(
  *   config))` then `startAllMicroservices()` in `main.ts`, plus
@@ -46,8 +48,8 @@ import {
       },
     ]),
   ],
-  providers: [RabbitmqService],
-  exports: [ClientsModule, RabbitmqService],
+  providers: [RabbitmqService, RabbitmqConfirmPublisherService],
+  exports: [ClientsModule, RabbitmqService, RabbitmqConfirmPublisherService],
 })
 export class RabbitmqModule {}
 

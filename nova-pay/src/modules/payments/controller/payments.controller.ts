@@ -32,6 +32,7 @@ import { GetPaymentByIdHandler } from '../query/handlers/get-payment-by-id.handl
 import { GetPaymentByReferenceHandler } from '../query/handlers/get-payment-by-reference.handler';
 import { GetPaymentByIdQuery } from '../query/impl/get-payment-by-id.query';
 import { GetPaymentByReferenceQuery } from '../query/impl/get-payment-by-reference.query';
+import { assertIdempotencyKeyMatchesBodyField } from '../../../common/utils/assert-idempotency-key-matches-body-field.util';
 
 export class PaymentResponseDto {
   @ApiProperty({ format: 'uuid' })
@@ -75,21 +76,6 @@ export class PaymentResponseDto {
 
   @ApiProperty()
   updatedAt: Date;
-}
-
-function assertIdempotencyHeaderMatchesBody(
-  headerValue: string | undefined,
-  bodyKey: string,
-): void {
-  const h = headerValue?.trim();
-  if (!h) {
-    throw new BadRequestException('Idempotency-Key header is required');
-  }
-  if (h !== bodyKey) {
-    throw new BadRequestException(
-      'Idempotency-Key header must exactly match body idempotencyKey',
-    );
-  }
 }
 
 function toPaymentResponse(p: Payment): PaymentResponseDto {
@@ -142,7 +128,11 @@ export class PaymentsController {
     @Headers('idempotency-key') idempotencyKeyHeader: string | undefined,
     @Body() dto: CreatePaymentDto,
   ): Promise<PaymentResponseDto> {
-    assertIdempotencyHeaderMatchesBody(idempotencyKeyHeader, dto.idempotencyKey);
+    assertIdempotencyKeyMatchesBodyField(
+      idempotencyKeyHeader,
+      dto.idempotencyKey,
+      'idempotencyKey',
+    );
     const payment = await this.createPaymentHandler.execute(
       new CreatePaymentCommand(dto),
     );

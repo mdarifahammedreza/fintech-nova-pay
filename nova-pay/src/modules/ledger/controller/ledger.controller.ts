@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   NotFoundException,
   Param,
   ParseUUIDPipe,
@@ -10,6 +11,7 @@ import {
 import {
   ApiBearerAuth,
   ApiBody,
+  ApiHeader,
   ApiOkResponse,
   ApiOperation,
   ApiParam,
@@ -30,6 +32,7 @@ import { LedgerTransactionStatus } from '../enums/ledger-transaction-status.enum
 import { LedgerTransactionType } from '../enums/ledger-transaction-type.enum';
 import { GetLedgerTransactionByIdHandler } from '../query/handlers/get-ledger-transaction-by-id.handler';
 import { GetLedgerTransactionByIdQuery } from '../query/impl/get-ledger-transaction-by-id.query';
+import { assertIdempotencyKeyMatchesBodyField } from '../../../common/utils/assert-idempotency-key-matches-body-field.util';
 
 export class LedgerEntryResponseDto {
   @ApiProperty({ format: 'uuid' })
@@ -116,8 +119,9 @@ function toTransactionResponse(
 }
 
 /**
- * Ledger HTTP surface — postings and reads only; account projections are
- * updated inside {@link PostingService} / future TX wiring, not here.
+ * Ledger HTTP surface — postings and reads only. Writes call
+ * {@link PostingService.post} / reversal; mutating routes require
+ * `Idempotency-Key` = `correlationId` (NovaPay money-API rules).
  * TODO: `JwtAuthGuard` + admin / internal API policy.
  */
 @Controller('ledger')
@@ -132,11 +136,22 @@ export class LedgerController {
 
   @Post('transactions')
   @ApiOperation({ summary: 'Post a ledger transaction (balanced entries)' })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: true,
+    description: 'Must match `correlationId` in the body (stable across retries)',
+  })
   @ApiBody({ type: PostLedgerTransactionDto })
   @ApiOkResponse({ type: LedgerTransactionResponseDto })
   async postTransaction(
+    @Headers('idempotency-key') idempotencyKeyHeader: string | undefined,
     @Body() dto: PostLedgerTransactionDto,
   ): Promise<LedgerTransactionResponseDto> {
+    assertIdempotencyKeyMatchesBodyField(
+      idempotencyKeyHeader,
+      dto.correlationId,
+      'correlationId',
+    );
     const tx = await this.postHandler.execute(
       new PostLedgerTransactionCommand(dto),
     );
@@ -145,11 +160,22 @@ export class LedgerController {
 
   @Post('reversals')
   @ApiOperation({ summary: 'Reverse a posted ledger transaction' })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: true,
+    description: 'Must match `correlationId` in the body (stable across retries)',
+  })
   @ApiBody({ type: ReverseLedgerTransactionDto })
   @ApiOkResponse({ type: LedgerTransactionResponseDto })
   async reverseTransaction(
+    @Headers('idempotency-key') idempotencyKeyHeader: string | undefined,
     @Body() dto: ReverseLedgerTransactionDto,
   ): Promise<LedgerTransactionResponseDto> {
+    assertIdempotencyKeyMatchesBodyField(
+      idempotencyKeyHeader,
+      dto.correlationId,
+      'correlationId',
+    );
     const tx = await this.reverseHandler.execute(
       new ReverseLedgerTransactionCommand(dto),
     );

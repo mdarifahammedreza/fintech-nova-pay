@@ -4,6 +4,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { DatabaseModule } from './infrastructure/database/database.module';
 import { OutboxModule } from './infrastructure/outbox/outbox.module';
+import { OutboxRelayModule } from './infrastructure/outbox/outbox-relay.module';
 import { AccountsModule } from './modules/accounts/accounts.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { LedgerModule } from './modules/ledger/ledger.module';
@@ -17,8 +18,16 @@ type Importable =
 
 /**
  * Infrastructure roots (infrastructure/database, messaging, cache, …).
+ * Set `OUTBOX_RELAY_MODULE_DISABLED=true` to omit RabbitMQ relay (e.g. CI
+ * without `RABBITMQ_URL`); production should load {@link OutboxRelayModule}.
  */
-const infrastructureImports: Importable[] = [DatabaseModule, OutboxModule];
+const infrastructureImports: Importable[] = [
+  DatabaseModule,
+  OutboxModule,
+  ...(process.env.OUTBOX_RELAY_MODULE_DISABLED === 'true'
+    ? []
+    : [OutboxRelayModule]),
+];
 
 /**
  * Feature module roots. `AuthModule` imports `UsersModule` for

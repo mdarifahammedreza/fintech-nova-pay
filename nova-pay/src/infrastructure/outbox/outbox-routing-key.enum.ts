@@ -5,6 +5,7 @@
 export enum OutboxRoutingKey {
   LEDGER_TRANSACTION_POSTED = 'ledger.transaction.posted',
   LEDGER_TRANSACTION_REVERSED = 'ledger.transaction.reversed',
+  PAYMENT_CREATED = 'payment.created',
   PAYMENT_COMPLETED = 'payment.completed',
   PAYMENT_FAILED = 'payment.failed',
 }

@@ -47,6 +47,13 @@ export class OutboxEvent {
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
 
+  /**
+   * Set when a relay worker claims the row (`CLAIMED`); used to reclaim stale
+   * claims after crashes (see {@link OutboxRepository.reclaimStaleClaimed}).
+   */
+  @Column({ name: 'claimed_at', type: 'timestamptz', nullable: true })
+  claimedAt: Date | null;
+
   @Column({ name: 'published_at', type: 'timestamptz', nullable: true })
   publishedAt: Date | null;
 }

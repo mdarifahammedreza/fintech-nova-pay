@@ -37,8 +37,9 @@ export class RabbitmqService {
   ) {}
 
   /**
-   * Cold Observable — subscribe or use `publishAndLog` for fire-and-forget.
-   * Outbox relay awaits this Observable before marking a row published.
+   * Cold Observable — outbox relay awaits completion before `markPublished`.
+   * With Nest RMQ this reflects client-side dispatch, not a broker publisher
+   * confirm; combine with DB row checks and consumer dedupe on `messageId`.
    */
   publish$(envelope: DomainEventEnvelope): Observable<void> {
     return this.client.emit(envelope.routingKey, envelope).pipe(

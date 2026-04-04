@@ -17,17 +17,9 @@ import { PostingService } from './posting.service';
 
 /**
  * Compensating postings: builds mirrored debit/credit lines and delegates to
- * {@link PostingService} so history is never updated in place.
- *
- * **Transaction boundary:** the reversal attempt should run in one TX with
- * `PostingService.post` (ledger persist → projections →
- * `ledger.transaction.reversed` outbox for `REVERSAL` type). Optionally lock
- * the original transaction
- * row or use isolation so double-reversal is impossible.
- *
- * TODO: Pass through the same `EntityManager` as `PostingService.post` when
- * multi-step ledger APIs are wired.
- * TODO: Reject if `originalLedgerTransactionId` was already reversed (policy).
+ * {@link PostingService.post}. The posting layer locks the original row,
+ * enforces at most one `REVERSAL` per target (DB partial unique index + insert
+ * replay), and writes `ledger.transaction.reversed` to the outbox.
  */
 @Injectable()
 export class ReversalService {

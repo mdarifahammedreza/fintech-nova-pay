@@ -12,6 +12,7 @@ import {
 import { OutboxRepository } from '../../../infrastructure/outbox/outbox.repository';
 import { OutboxRoutingKey } from '../../../infrastructure/outbox/outbox-routing-key.enum';
 import { Account } from '../../accounts/entities/account.entity';
+import { AccountStatus } from '../../accounts/enums/account-status.enum';
 import { AccountsService } from '../../accounts/service/accounts.service';
 import {
   PostLedgerEntryLineDto,
@@ -29,21 +30,23 @@ const SCALE_FACTOR = 10_000n;
  * Financial posting: one {@link LedgerTransaction} and N {@link LedgerEntry}
  * rows per call. Does not mutate historical rows.
  *
- * **Transaction:** `post()` opens its own PostgreSQL transaction. Payment
- * orchestration uses {@link postWithSharedManager} with a caller-supplied
- * `EntityManager` so money + ledger commit atomically.
+ * **Transaction:** `post()` wraps work in its own PostgreSQL transaction.
+ * {@link postWithSharedManager} uses the caller’s `EntityManager` so callers
+ * (e.g. payment orchestration) can commit ledger + their writes together.
  *
  * Inside each posting segment, in order:
- * 1. Required `correlationId`: `FOR UPDATE` lookup; on duplicate insert (`23505`)
- *    reload and return the committed transaction (no double post).
- * 2. `FOR UPDATE` lock each affected account; verify `availableBalance` and
- *    `overdraftLimit` against this posting’s net delta **before** any ledger row
- *    insert (no pre-check outside this TX).
- * 3. Ledger header + entry line inserts.
- * 4. Account projection updates ({@link AccountsService.applyLedgerPostingProjections}).
- * 5. TODO: Outbox enqueue via `OutboxRepository.enqueueInTransaction`.
- *
- * RabbitMQ: only after DB commit via outbox relay — never `emit` here.
+ * 1. `correlationId`: `FOR UPDATE` lookup; on header insert `23505`, reload winner
+ *    by `correlationId` or (for `REVERSAL`) by `reversesTransactionId` and return.
+ * 2. Reversal: lock target row `FOR UPDATE`, reject if already reversed or invalid;
+ *    concurrent duplicate reversal inserts also hit `23505` when the partial
+ *    unique index on {@link LedgerTransaction} exists in PostgreSQL (sync/migrate).
+ *    Then lock accounts (sorted ids), check `ACTIVE`, currency, balance rules.
+ * 3. Ledger header + entry inserts.
+ * 4. Apply `balance` / `availableBalance` deltas via
+ *    {@link AccountsService.applyLedgerPostingProjections} on the **same**
+ *    `EntityManager` (same commit as the lines — not a separate durability story).
+ * 5. Insert an outbox row only (no RabbitMQ here); relay publishes **after** commit
+ *    and may retry — delivery to brokers/consumers is **not** guaranteed here.
  */
 @Injectable()
 export class PostingService {
@@ -70,9 +73,10 @@ export class PostingService {
   }
 
   /**
-   * Same as {@link post} but uses the caller’s `EntityManager` (no nested
-   * committing boundary). Payment orchestration uses this for one atomic money
-   * transaction with idempotency + payment rows.
+   * Same posting logic as {@link post} on the supplied `EntityManager` (no inner
+   * `DataSource.transaction`). Payment orchestration passes the open money TX so
+   * payment + idempotency + ledger + projections + outbox rows commit together;
+   * other callers must manage their own transaction boundary if needed.
    */
   async postWithSharedManager(
     manager: EntityManager,
@@ -117,11 +121,29 @@ export class PostingService {
       const winner = await manager.findOne(LedgerTransaction, {
         where: { correlationId },
       });
-      if (!winner) {
-        throw err;
+      if (winner) {
+        const replay = await loadTxWithEntries(manager, winner.id);
+        return replay ?? winner;
       }
-      const replay = await loadTxWithEntries(manager, winner.id);
-      return replay ?? winner;
+      if (
+        dto.type === LedgerTransactionType.REVERSAL &&
+        dto.reversesTransactionId
+      ) {
+        const existingReversal = await manager.findOne(LedgerTransaction, {
+          where: {
+            type: LedgerTransactionType.REVERSAL,
+            reversesTransactionId: dto.reversesTransactionId,
+          },
+        });
+        if (existingReversal) {
+          const replay = await loadTxWithEntries(
+            manager,
+            existingReversal.id,
+          );
+          return replay ?? existingReversal;
+        }
+      }
+      throw err;
     }
 
     const lineRows = dto.entries.map((e, i) => ({
@@ -190,9 +212,9 @@ export class PostingService {
   }
 
   /**
-   * Locks every account touched by the bundle (sorted id order), then ensures
-   * `availableBalance + netDelta >= -overdraftLimit` for each — same TX as the
-   * subsequent ledger inserts (architecture: never split check vs post).
+   * Locks every account touched by the bundle (sorted id order), then checks
+   * `ACTIVE`, line currency vs account currency, and
+   * `availableBalance + netDelta >= -overdraftLimit` — same TX as inserts.
    */
   private async validateAccountBalancesBeforeLedgerInsert(
     manager: EntityManager,
@@ -230,6 +252,11 @@ export class PostingService {
           `Account ${id} not found for ledger posting`,
         );
       }
+      if (account.status !== AccountStatus.ACTIVE) {
+        throw new BadRequestException(
+          'Only ACTIVE accounts may be posted against',
+        );
+      }
       const expectedCurrency = currencyByAccount.get(id)!;
       if (account.currency !== expectedCurrency) {
         throw new BadRequestException(
@@ -249,6 +276,12 @@ export class PostingService {
     }
   }
 
+  /**
+   * Reversal path: lock the original row `FOR UPDATE`, validate `POSTED` / not
+   * already a `REVERSAL`, and reject if a `REVERSAL` row for that id exists.
+   * Duplicate concurrent inserts rely on the DB partial unique index (see entity)
+   * plus `23505` handling in {@link postWithSharedManager}.
+   */
   private async assertReversalTargetPosted(
     manager: EntityManager,
     dto: PostLedgerTransactionDto,
@@ -258,6 +291,7 @@ export class PostingService {
     }
     const target = await manager.findOne(LedgerTransaction, {
       where: { id: dto.reversesTransactionId },
+      lock: { mode: 'pessimistic_write' },
     });
     if (!target) {
       throw new NotFoundException('Reversal target transaction not found');
@@ -265,6 +299,22 @@ export class PostingService {
     if (target.status !== LedgerTransactionStatus.POSTED) {
       throw new BadRequestException(
         'Reversal target must be in POSTED status',
+      );
+    }
+    if (target.type === LedgerTransactionType.REVERSAL) {
+      throw new BadRequestException(
+        'Reversing a reversal is not supported here; use an explicit posting',
+      );
+    }
+    const existingReversal = await manager.findOne(LedgerTransaction, {
+      where: {
+        type: LedgerTransactionType.REVERSAL,
+        reversesTransactionId: target.id,
+      },
+    });
+    if (existingReversal) {
+      throw new BadRequestException(
+        'This ledger transaction has already been reversed',
       );
     }
   }

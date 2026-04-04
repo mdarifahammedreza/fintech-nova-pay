@@ -30,8 +30,9 @@ import { PaymentType } from '../enums/payment-type.enum';
 import { IdempotencyRecordRepository } from '../repositories/idempotency-record.repository';
 
 /**
- * Coordinates payment intent → account checks → ledger post → payment outcome
- * using {@link PostingService} and the shared `DataSource` transaction only.
+ * Coordinates payment intent → locked account checks → ledger post → payment
+ * outcome in one `DataSource.transaction`, using {@link PostingService},
+ * {@link OutboxRepository}, and {@link IdempotencyRecordRepository}.
  *
  * ## Money-path transaction (NovaPay architecture)
  *
@@ -43,15 +44,20 @@ import { IdempotencyRecordRepository } from '../repositories/idempotency-record.
  * `(idempotency_key, scope_key)` under the same `EntityManager`; races reload
  * and return the same payment row.
  *
+ * **Accounts:** source and destination are loaded with `FOR UPDATE` (sorted by
+ * id, same order as ledger balance validation) before status/currency checks.
+ *
  * TODO: **Fraud** — synchronous policy checks before ledger with locks held.
  *
- * Outbox: {@link OutboxRepository.enqueueInTransaction} for `payment.completed`
- * or `payment.failed` in the same TX as terminal payment + idempotency state.
- * Ledger events are written inside {@link PostingService.postWithSharedManager}.
+ * Outbox: persists `payment.created` (first materialize), `payment.completed` /
+ * `payment.failed` (terminal), and ledger rows from {@link PostingService}, all
+ * in **this** DB transaction. That only guarantees rows exist for the relay;
+ * RabbitMQ publish and consumer handling are separate (at-least-once; dedupe in
+ * consumers per architecture).
  *
- * **Failure path:** after a ledger error, FAILED rows and `payment.failed` are
- * saved and the callback **returns** the payment (no `throw`) so TypeORM
- * commits; callers map `FAILED` to HTTP.
+ * **Failure path:** after a ledger error, FAILED rows and `payment.failed`
+ * outbox are persisted and the callback **returns** the payment (no `throw`) so
+ * the transaction commits; callers map `FAILED` to HTTP.
  */
 @Injectable()
 export class PaymentOrchestratorService {
@@ -65,8 +71,8 @@ export class PaymentOrchestratorService {
 
   /**
    * Executes an internal money movement backed by a ledger post.
-   * Retries with the same idempotency key return the same {@link Payment}
-   * row (completed or failed) without executing the ledger path again.
+   * Same idempotency key returns the stored {@link Payment}; once status is
+   * `COMPLETED` or `FAILED`, the ledger path is not run again for that key.
    */
   async submitPayment(dto: CreatePaymentDto): Promise<Payment> {
     const scopeKey = dto.idempotencyScopeKey ?? '';
@@ -88,18 +94,10 @@ export class PaymentOrchestratorService {
         return payment;
       }
 
-      const source = await manager.findOne(Account, {
-        where: { id: dto.sourceAccountId },
-      });
-      const dest = await manager.findOne(Account, {
-        where: { id: dto.destinationAccountId },
-      });
-      if (!source) {
-        throw new NotFoundException('Source account not found');
-      }
-      if (!dest) {
-        throw new NotFoundException('Destination account not found');
-      }
+      const { source, dest } = await this.loadPaymentAccountsLocked(
+        manager,
+        dto,
+      );
       this.assertAccountsReady(source, dest, dto);
 
       payment.status = PaymentStatus.PROCESSING;
@@ -227,6 +225,21 @@ export class PaymentOrchestratorService {
         record.linkedPaymentId = payment.id;
         record.businessReference = dto.reference;
         await manager.save(IdempotencyRecord, record);
+        await this.outbox.enqueueInTransaction(manager, {
+          routingKey: OutboxRoutingKey.PAYMENT_CREATED,
+          correlationId: payment.correlationId ?? dto.correlationId ?? null,
+          occurredAt: new Date(),
+          payload: {
+            paymentId: payment.id,
+            idempotencyRecordId: record.id,
+            reference: payment.reference,
+            amount: payment.amount,
+            currency: payment.currency,
+            type: payment.type,
+            sourceAccountId: payment.sourceAccountId,
+            destinationAccountId: payment.destinationAccountId,
+          },
+        });
       } catch (err: unknown) {
         if (!isPostgresUniqueViolation(err)) {
           throw err;
@@ -256,6 +269,43 @@ export class PaymentOrchestratorService {
     }
 
     return { idempotencyRecord: record, payment };
+  }
+
+  /**
+   * `FOR UPDATE` on payment legs in **sorted account id** order (matches
+   * {@link PostingService} balance validation) to avoid deadlocks. Status and
+   * currency checks run only after these locks are held.
+   */
+  private async loadPaymentAccountsLocked(
+    manager: EntityManager,
+    dto: CreatePaymentDto,
+  ): Promise<{ source: Account; dest: Account }> {
+    const uniqueSorted = [
+      ...new Set([dto.sourceAccountId, dto.destinationAccountId]),
+    ].sort();
+    const byId = new Map<string, Account>();
+    for (const id of uniqueSorted) {
+      const row = await manager.findOne(Account, {
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!row) {
+        const label =
+          id === dto.sourceAccountId
+            ? 'Source account not found'
+            : id === dto.destinationAccountId
+              ? 'Destination account not found'
+              : 'Account not found';
+        throw new NotFoundException(label);
+      }
+      byId.set(row.id, row);
+    }
+    const source = byId.get(dto.sourceAccountId);
+    const dest = byId.get(dto.destinationAccountId);
+    if (!source || !dest) {
+      throw new NotFoundException('Source or destination account not found');
+    }
+    return { source, dest };
   }
 
   private assertAccountsReady(
@@ -327,10 +377,50 @@ function ledgerTypeForPayment(type: PaymentType): LedgerTransactionType {
   return LedgerTransactionType.PAYMENT;
 }
 
+/**
+ * JSON-stable structure: plain objects get keys sorted recursively; arrays keep
+ * element order; `undefined` object properties are omitted (JSON.stringify
+ * semantics). Ensures identical logical bodies hash the same in any engine.
+ */
+function canonicalizeForFingerprint(value: unknown): unknown {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+  if (typeof value === 'bigint') {
+    return value.toString();
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => canonicalizeForFingerprint(item));
+  }
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    const out: Record<string, unknown> = {};
+    for (const k of keys) {
+      const v = obj[k];
+      if (v === undefined) {
+        continue;
+      }
+      out[k] = canonicalizeForFingerprint(v);
+    }
+    return out;
+  }
+  return String(value);
+}
+
 function fingerprintCreatePayment(dto: CreatePaymentDto): string {
   const { idempotencyKey, idempotencyScopeKey, ...body } = dto;
+  const canonical = JSON.stringify(canonicalizeForFingerprint(body));
   return createHash('sha256')
-    .update(JSON.stringify(body))
+    .update(canonical)
     .digest('hex')
     .slice(0, 64);
 }

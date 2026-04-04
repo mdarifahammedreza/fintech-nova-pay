@@ -15,11 +15,19 @@ import { LedgerTransactionType } from '../enums/ledger-transaction-type.enum';
  * Immutable financial event header. Entries hang off this row. Corrections
  * are new transactions (e.g. {@link LedgerTransactionType.REVERSAL}), not
  * updates to historical data.
+ *
+ * Partial unique index `uq_ledger_reversal_per_original`: at most one row with
+ * `type = REVERSAL` per `reverses_transaction_id` (PostgreSQL).
  */
 @Entity({ name: 'ledger_transactions' })
 @Unique('ledger_transactions_correlation_id', ['correlationId'])
 @Index(['status'])
 @Index(['type'])
+@Index('uq_ledger_reversal_per_original', ['reversesTransactionId'], {
+  unique: true,
+  where:
+    `"type" = 'REVERSAL' AND "reverses_transaction_id" IS NOT NULL`,
+})
 export class LedgerTransaction {
   @PrimaryGeneratedColumn('uuid')
   id: string;
