@@ -14,7 +14,8 @@ import { ReversalService } from './service/reversal.service';
 
 /**
  * Ledger bounded context — postings, reversals, and reads via services.
- * Other modules should depend on exported services, not repositories.
+ * Cross-module consumers use {@link PostingService} only; reads and reversals
+ * stay inside this module (HTTP handlers + internal services).
  */
 @Module({
   imports: [TypeOrmModule.forFeature([LedgerTransaction, LedgerEntry])],
@@ -29,6 +30,6 @@ import { ReversalService } from './service/reversal.service';
     ReverseLedgerTransactionHandler,
     GetLedgerTransactionByIdHandler,
   ],
-  exports: [LedgerService, PostingService, ReversalService],
+  exports: [PostingService],
 })
 export class LedgerModule {}

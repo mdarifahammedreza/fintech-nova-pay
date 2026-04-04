@@ -1,10 +1,4 @@
-/**
- * Stable identifier for outbox rows and message routing. Do not concatenate
- * ad hoc strings at publishers — use this enum member.
- */
-export enum PaymentCompletedEventName {
-  PaymentCompleted = 'payment.completed',
-}
+import { PaymentDomainEventName } from '../enums/payment-domain-event-name.enum';
 
 /**
  * Emitted after ledger-first settlement and payment `COMPLETED` state.
@@ -16,14 +10,16 @@ export class PaymentCompletedEvent {
     public readonly paymentId: string,
     public readonly reference: string,
     public readonly correlationId: string | null,
+    /** Links completion to the idempotency slot (same as created/failed). */
+    public readonly idempotencyRecordId: string,
     /** Posted ledger bundle that settled funds. */
     public readonly ledgerTransactionId: string,
     /** ISO-8601 timestamp when completion was committed */
     public readonly occurredAt: string,
   ) {}
 
-  get eventName(): PaymentCompletedEventName {
-    return PaymentCompletedEventName.PaymentCompleted;
+  get eventName(): PaymentDomainEventName {
+    return PaymentDomainEventName.Completed;
   }
 
   toJSON(): Record<string, unknown> {
@@ -32,6 +28,7 @@ export class PaymentCompletedEvent {
       paymentId: this.paymentId,
       reference: this.reference,
       correlationId: this.correlationId,
+      idempotencyRecordId: this.idempotencyRecordId,
       ledgerTransactionId: this.ledgerTransactionId,
       occurredAt: this.occurredAt,
     };

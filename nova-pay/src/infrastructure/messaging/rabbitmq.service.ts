@@ -38,7 +38,7 @@ export class RabbitmqService {
 
   /**
    * Cold Observable — subscribe or use `publishAndLog` for fire-and-forget.
-   * TODO: Outbox worker subscribes after marking row dispatched / on retry.
+   * Outbox relay awaits this Observable before marking a row published.
    */
   publish$(envelope: DomainEventEnvelope): Observable<void> {
     return this.client.emit(envelope.routingKey, envelope).pipe(

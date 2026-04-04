@@ -1,10 +1,4 @@
-/**
- * Stable identifier for outbox rows and message routing. Do not concatenate
- * ad hoc strings at publishers — use this enum member.
- */
-export enum PaymentFailedEventName {
-  PaymentFailed = 'payment.failed',
-}
+import { PaymentDomainEventName } from '../enums/payment-domain-event-name.enum';
 
 /**
  * Emitted when a payment attempt ends in `FAILED` (e.g. validation, ledger,
@@ -24,8 +18,8 @@ export class PaymentFailedEvent {
     public readonly reason: string | null,
   ) {}
 
-  get eventName(): PaymentFailedEventName {
-    return PaymentFailedEventName.PaymentFailed;
+  get eventName(): PaymentDomainEventName {
+    return PaymentDomainEventName.Failed;
   }
 
   toJSON(): Record<string, unknown> {

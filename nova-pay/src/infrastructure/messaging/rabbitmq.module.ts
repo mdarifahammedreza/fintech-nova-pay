@@ -13,8 +13,8 @@ import {
 /**
  * Outbound RMQ client for async domain notifications.
  *
- * TODO: Connect **outbox publisher** (infrastructure or ledger module) to
- * `RabbitmqService` **after** PostgreSQL commit — never before.
+ * Post-commit publishing: `OutboxProcessorService` calls `RabbitmqService`
+ * only after outbox rows are committed — never from controllers.
  *
  * TODO: Inbound consumers: `app.connectMicroservice(createRmqInboundOptions(
  *   config))` then `startAllMicroservices()` in `main.ts`, plus

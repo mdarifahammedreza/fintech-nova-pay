@@ -1,13 +1,6 @@
 import { Currency } from '../../accounts/enums/currency.enum';
+import { PaymentDomainEventName } from '../enums/payment-domain-event-name.enum';
 import { PaymentType } from '../enums/payment-type.enum';
-
-/**
- * Stable identifier for outbox rows and message routing. Do not concatenate
- * ad hoc strings at publishers — use this enum member.
- */
-export enum PaymentCreatedEventName {
-  PaymentCreated = 'payment.created',
-}
 
 /**
  * Emitted when a payment row is first persisted (e.g. `PENDING` / `PROCESSING`).
@@ -33,8 +26,8 @@ export class PaymentCreatedEvent {
     public readonly occurredAt: string,
   ) {}
 
-  get eventName(): PaymentCreatedEventName {
-    return PaymentCreatedEventName.PaymentCreated;
+  get eventName(): PaymentDomainEventName {
+    return PaymentDomainEventName.Created;
   }
 
   toJSON(): Record<string, unknown> {

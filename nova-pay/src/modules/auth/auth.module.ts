@@ -33,6 +33,6 @@ import { TokenService } from './service/token.service';
     RegisterHandler,
     ValidateSessionHandler,
   ],
-  exports: [AuthService, TokenService],
+  exports: [JwtModule, AuthService, TokenService],
 })
 export class AuthModule {}

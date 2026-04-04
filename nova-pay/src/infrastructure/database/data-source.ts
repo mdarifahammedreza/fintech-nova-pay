@@ -20,7 +20,10 @@ const ext = useDist ? 'js' : 'ts';
 const options: DataSourceOptions = {
   type: 'postgres',
   url: writeUrl,
-  entities: [join(codeRoot, 'modules', '**', `*.entity.${ext}`)],
+  entities: [
+    join(codeRoot, 'modules', '**', `*.entity.${ext}`),
+    join(codeRoot, 'infrastructure', 'outbox', `*.entity.${ext}`),
+  ],
   migrations: [
     join(
       codeRoot,
