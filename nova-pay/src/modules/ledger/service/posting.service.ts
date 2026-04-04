@@ -20,10 +20,26 @@ const SCALE_FACTOR = 10_000n;
  * Financial posting: one {@link LedgerTransaction} and N {@link LedgerEntry}
  * rows per call. Does not mutate historical rows.
  *
- * TODO: Run validation + inserts + account projection updates + outbox writes
- * inside one explicit DB transaction (query runner / transactionalEntityManager).
- * TODO: Emit `ledger.transaction.posted` only via outbox after commit — never
- * publish RabbitMQ from this service before commit.
+ * ## Ordering inside the **shared** money `EntityManager` transaction
+ *
+ * Callers (e.g. payment orchestration) start the TX, hold account locks, and run
+ * balance checks **before** calling into here. This service must **not** open
+ * its own committing boundary once wired — accept `EntityManager` when ready.
+ *
+ * 1. **Validation** — balanced entries, reversal metadata (pure or same-manager
+ *    reads as required).
+ * 2. **Ledger persist** — insert transaction header + entry lines atomically
+ *    (no committed header without lines).
+ * 3. **Balance projections** — update `accounts` for each `accountId` in entries
+ *    in the **same** TX (delegation TBD; not implemented here).
+ * 4. **Outbox** — `OutboxRepository.enqueueInTransaction` for
+ *    `ledger.transaction.posted` (payload from committed-in-TX state only).
+ *
+ * TODO: Add `post(manager: EntityManager, dto)` (or equivalent) and route all
+ * saves through `manager` so steps 2–4 share the caller’s TX.
+ * TODO: Wire projection updates and outbox enqueue once account/ledger coupling
+ * is injected without cross-module repository leaks.
+ * RabbitMQ: only after DB commit via outbox relay — never `emit` here.
  */
 @Injectable()
 export class PostingService {
@@ -35,6 +51,9 @@ export class PostingService {
   /**
    * Validates, persists a new posted bundle, returns header with entries.
    * Idempotent when `correlationId` matches an existing transaction.
+   *
+   * TODO: Idempotency replay (`findByCorrelationId`) must run under the caller’s
+   * TX / isolation so a concurrent poster cannot race between check and insert.
    */
   async post(dto: PostLedgerTransactionDto): Promise<LedgerTransaction> {
     if (dto.correlationId) {
@@ -50,7 +69,8 @@ export class PostingService {
     assertBalancedPerCurrency(dto.entries);
     const lineNumbers = assignLineNumbers(dto.entries);
 
-    // TODO: Move the following saves into the same TX as account locks/projections.
+    // TODO: Steps 2–4 of class-level ordering — use caller `EntityManager` and
+    // include projection + `ledger.transaction.posted` outbox before commit.
     const tx = await this.txRepo.save({
       type: dto.type,
       status: LedgerTransactionStatus.POSTED,

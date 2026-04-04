@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   NotFoundException,
   Param,
   ParseUUIDPipe,
@@ -12,6 +13,7 @@ import {
 import {
   ApiBearerAuth,
   ApiBody,
+  ApiHeader,
   ApiOkResponse,
   ApiOperation,
   ApiParam,
@@ -75,6 +77,21 @@ export class PaymentResponseDto {
   updatedAt: Date;
 }
 
+function assertIdempotencyHeaderMatchesBody(
+  headerValue: string | undefined,
+  bodyKey: string,
+): void {
+  const h = headerValue?.trim();
+  if (!h) {
+    throw new BadRequestException('Idempotency-Key header is required');
+  }
+  if (h !== bodyKey) {
+    throw new BadRequestException(
+      'Idempotency-Key header must exactly match body idempotencyKey',
+    );
+  }
+}
+
 function toPaymentResponse(p: Payment): PaymentResponseDto {
   return {
     id: p.id,
@@ -97,8 +114,7 @@ function toPaymentResponse(p: Payment): PaymentResponseDto {
 /**
  * Payments HTTP surface — writes go through orchestration; reads via
  * {@link PaymentsService} only. No direct balance mutation here.
- * TODO: `JwtAuthGuard` + ownership / limits; align `Idempotency-Key` header
- * with body key at API gateway if required.
+ * TODO: `JwtAuthGuard` + ownership / limits.
  */
 @Controller('payments')
 @ApiTags('payments')
@@ -114,11 +130,19 @@ export class PaymentsController {
   @ApiOperation({
     summary: 'Create / submit payment (idempotent, ledger-backed)',
   })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: true,
+    description:
+      'Must match `idempotencyKey` in the body (stable per logical attempt)',
+  })
   @ApiBody({ type: CreatePaymentDto })
   @ApiOkResponse({ type: PaymentResponseDto })
   async create(
+    @Headers('idempotency-key') idempotencyKeyHeader: string | undefined,
     @Body() dto: CreatePaymentDto,
   ): Promise<PaymentResponseDto> {
+    assertIdempotencyHeaderMatchesBody(idempotencyKeyHeader, dto.idempotencyKey);
     const payment = await this.createPaymentHandler.execute(
       new CreatePaymentCommand(dto),
     );

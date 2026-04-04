@@ -1,18 +1,17 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { RabbitmqModule } from '../messaging/rabbitmq.module';
 import { OutboxEvent } from './outbox-event.entity';
-import { OutboxProcessorService } from './outbox-processor.service';
 import { OutboxRepository } from './outbox.repository';
 
 /**
- * Transactional outbox (PostgreSQL) + post-commit RabbitMQ relay.
- * Feature modules import this module to inject {@link OutboxRepository} and
- * call {@link OutboxRepository.enqueueInTransaction} inside their own TX.
+ * Transactional outbox persistence. Feature modules import this module and call
+ * {@link OutboxRepository.enqueueInTransaction} inside their own DB
+ * transaction. Does **not** register RabbitMQ — use {@link OutboxRelayModule}
+ * in a process that should run the post-commit relay.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([OutboxEvent]), RabbitmqModule],
-  providers: [OutboxRepository, OutboxProcessorService],
-  exports: [OutboxRepository, OutboxProcessorService],
+  imports: [TypeOrmModule.forFeature([OutboxEvent])],
+  providers: [OutboxRepository],
+  exports: [TypeOrmModule, OutboxRepository],
 })
 export class OutboxModule {}

@@ -22,8 +22,8 @@ export class CreatePaymentDto {
     maxLength: 128,
     example: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
     description:
-      'Client-generated unique key per logical payment attempt; MUST be ' +
-      'stable across retries (maps to `Idempotency-Key` header at the edge)',
+      'Client-generated unique key per logical payment attempt; MUST match ' +
+      'the `Idempotency-Key` HTTP header exactly and stay stable across retries',
   })
   @IsString()
   @MinLength(8)

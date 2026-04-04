@@ -23,6 +23,12 @@ export type PaginatedPayments = {
 /**
  * Payment + idempotency persistence for this module. Uses payment repositories
  * only — no account or ledger repos.
+ *
+ * **Transaction boundary:** `finalizeSuccessfulPayment` and
+ * `markPaymentFailedWithIdempotency` mutate payment + idempotency rows that
+ * must eventually commit in the **same** PostgreSQL transaction as the ledger
+ * insert, account projection updates, and outbox writes orchestrated by
+ * `PaymentOrchestratorService` / `PostingService` (see their phase lists).
  */
 @Injectable()
 export class PaymentsService {
@@ -48,7 +54,23 @@ export class PaymentsService {
       scopeKey,
       status: IdempotencyRecordStatus.PENDING,
       requestFingerprint,
+      linkedPaymentId: null,
+      businessReference: null,
     });
+  }
+
+  /**
+   * Binds the idempotency slot to the materialized payment + business reference
+   * for support and outbox correlation (no payment/ledger rules).
+   */
+  async linkIdempotencyToCreatedPayment(
+    record: IdempotencyRecord,
+    payment: Payment,
+    businessReference: string,
+  ): Promise<void> {
+    record.linkedPaymentId = payment.id;
+    record.businessReference = businessReference;
+    await this.idempotency.save(record);
   }
 
   saveIdempotencyRecord(row: IdempotencyRecord): Promise<IdempotencyRecord> {
@@ -95,7 +117,10 @@ export class PaymentsService {
 
   /**
    * Marks payment completed and idempotency slot completed after a successful
-   * ledger post (same outer transaction in production).
+   * ledger post.
+   * TODO: Invoked inside the money TX only — same commit as ledger lines,
+   * projections, and outbox: `payment.completed` (+ any `ledger.*` not written in
+   * `PostingService`).
    */
   async finalizeSuccessfulPayment(
     payment: Payment,
@@ -111,6 +136,21 @@ export class PaymentsService {
 
   async markPaymentFailed(payment: Payment): Promise<Payment> {
     payment.status = PaymentStatus.FAILED;
+    return this.payments.save(payment);
+  }
+
+  /**
+   * Terminal failure: marks both payment and idempotency slot so retries replay
+   * the same outcome without re-posting to the ledger.
+   * TODO: Same PostgreSQL transaction as payment update + outbox `payment.failed`.
+   */
+  async markPaymentFailedWithIdempotency(
+    payment: Payment,
+    idempotencyRecord: IdempotencyRecord,
+  ): Promise<Payment> {
+    payment.status = PaymentStatus.FAILED;
+    idempotencyRecord.status = IdempotencyRecordStatus.FAILED;
+    await this.idempotency.save(idempotencyRecord);
     return this.payments.save(payment);
   }
 
