@@ -1,27 +1,49 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { CancelPayrollRunHandler } from './command/handlers/cancel-payroll-run.handler';
-import { SubmitPayrollRunHandler } from './command/handlers/submit-payroll-run.handler';
+import { AccountsModule } from '../accounts/accounts.module';
+import { LedgerModule } from '../ledger/ledger.module';
+import { PaymentsModule } from '../payments/payments.module';
+import { CreatePayrollBatchHandler } from './command/handlers/create-payroll-batch.handler';
+import { ProcessPayrollBatchHandler } from './command/handlers/process-payroll-batch.handler';
 import { PayrollController } from './controller/payroll.controller';
-import { PayrollRun } from './entities/payroll-run.entity';
-import { GetPayrollRunByIdHandler } from './query/handlers/get-payroll-run-by-id.handler';
-import { PayrollRunRepository } from './repositories/payroll-run.repository';
+import { PayrollBatch } from './entities/payroll-batch.entity';
+import { PayrollFundingReservation } from './entities/payroll-funding-reservation.entity';
+import { PayrollItem } from './entities/payroll-item.entity';
+import { GetPayrollBatchByIdHandler } from './query/handlers/get-payroll-batch-by-id.handler';
+import { PayrollBatchRepository } from './repositories/payroll-batch.repository';
+import { PayrollFundingReservationRepository } from './repositories/payroll-funding-reservation.repository';
+import { PayrollItemRepository } from './repositories/payroll-item.repository';
+import { PayrollOrchestratorService } from './service/payroll-orchestrator.service';
 import { PayrollService } from './service/payroll.service';
+import { PayrollValidationService } from './service/payroll-validation.service';
 
 /**
- * Payroll bounded context — skeleton only; wires CQRS-style handlers and
- * persistence for upcoming reservation / fanout flows.
+ * Payroll bounded context — batch create/process and reads via handlers +
+ * {@link PayrollService} / {@link PayrollOrchestratorService}.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([PayrollRun])],
+  imports: [
+    TypeOrmModule.forFeature([
+      PayrollBatch,
+      PayrollItem,
+      PayrollFundingReservation,
+    ]),
+    AccountsModule,
+    LedgerModule,
+    PaymentsModule,
+  ],
   controllers: [PayrollController],
   providers: [
-    PayrollRunRepository,
+    PayrollBatchRepository,
+    PayrollItemRepository,
+    PayrollFundingReservationRepository,
     PayrollService,
-    SubmitPayrollRunHandler,
-    CancelPayrollRunHandler,
-    GetPayrollRunByIdHandler,
+    PayrollValidationService,
+    PayrollOrchestratorService,
+    CreatePayrollBatchHandler,
+    ProcessPayrollBatchHandler,
+    GetPayrollBatchByIdHandler,
   ],
-  exports: [PayrollService],
+  exports: [PayrollService, PayrollOrchestratorService],
 })
 export class PayrollModule {}
