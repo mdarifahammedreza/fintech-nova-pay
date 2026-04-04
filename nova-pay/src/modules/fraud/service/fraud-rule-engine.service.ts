@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, QueryFailedError, Repository } from 'typeorm';
 import { RedisService } from '../../../infrastructure/cache/redis.service';
 import { KnownDevice } from '../entities/known-device.entity';
 import { UserTransactionHourProfile } from '../entities/user-transaction-hour-profile.entity';
@@ -43,20 +43,29 @@ export class FraudRuleEngineService {
    * hot path stays within ~200ms; on budget overrun returns synthetic ERROR
    * rows for every rule (fail closed upstream).
    */
-  async evaluateAll(
-    ctx: FraudEvaluationContext,
-  ): Promise<FraudRuleEvaluationResult[]> {
-    const run = Promise.all([
+  async evaluateAll(ctx: FraudEvaluationContext): Promise<{
+    results: FraudRuleEvaluationResult[];
+    timedOut: boolean;
+  }> {
+    const work = Promise.all([
       this.ruleVelocity(ctx),
       this.ruleLargeTransaction(ctx),
       this.ruleNewDeviceLargeAmount(ctx),
       this.ruleUnusualHour(ctx),
       this.ruleRecipientVelocity(ctx),
-    ]);
-    return Promise.race([
-      run,
-      this.engineTimeoutOutcome(),
-    ]);
+    ]).then((r) => ({ tag: 'ok' as const, rows: r }));
+    const timeout = this.delay(ENGINE_BUDGET_MS).then(() => ({
+      tag: 'timeout' as const,
+      rows: this.allRulesTimeoutSynthetic(),
+    }));
+    const outcome = await Promise.race([work, timeout]);
+    const timedOut = outcome.tag === 'timeout';
+    if (timedOut) {
+      this.logger.warn(
+        'Fraud engine budget exceeded; returning synthetic fail-closed rows',
+      );
+    }
+    return { results: outcome.rows, timedOut };
   }
 
   /**
@@ -70,9 +79,7 @@ export class FraudRuleEngineService {
     ]);
   }
 
-  private async engineTimeoutOutcome(): Promise<FraudRuleEvaluationResult[]> {
-    await this.delay(ENGINE_BUDGET_MS);
-    this.logger.warn('Fraud engine budget exceeded; returning synthetic errors');
+  private allRulesTimeoutSynthetic(): FraudRuleEvaluationResult[] {
     const types = [
       FraudRuleType.VELOCITY,
       FraudRuleType.LARGE_TRANSACTION,
@@ -183,9 +190,7 @@ export class FraudRuleEngineService {
     const t0 = Date.now();
     const ruleType = FraudRuleType.LARGE_TRANSACTION;
     const amt = this.parseAmount(ctx.amount);
-    if (ctx.currency !== 'USD') {
-      // TODO: normalize via treasury/FX service when currency !== settlement USD
-    }
+    // TODO: normalize to USD equivalent via treasury/FX when needed.
     if (amt > LARGE_AMOUNT_USD) {
       return {
         ruleType,
@@ -193,7 +198,11 @@ export class FraudRuleEngineService {
         recommendedDecision: FraudDecisionState.ACTION_REQUIRED,
         reasonCode: 'LARGE_AMOUNT_OTP',
         message: 'Amount exceeds threshold; OTP challenge required',
-        evidence: { threshold: LARGE_AMOUNT_USD, amount: ctx.amount },
+        evidence: {
+          threshold: LARGE_AMOUNT_USD,
+          amount: ctx.amount,
+          currency: ctx.currency,
+        },
         durationMs: Date.now() - t0,
       };
     }
@@ -203,7 +212,11 @@ export class FraudRuleEngineService {
       recommendedDecision: FraudDecisionState.APPROVED,
       reasonCode: 'LARGE_AMOUNT_OK',
       message: 'Below large-transaction threshold',
-      evidence: { threshold: LARGE_AMOUNT_USD, amount: ctx.amount },
+      evidence: {
+        threshold: LARGE_AMOUNT_USD,
+        amount: ctx.amount,
+        currency: ctx.currency,
+      },
       durationMs: Date.now() - t0,
     };
   }
@@ -292,10 +305,10 @@ export class FraudRuleEngineService {
       };
     }
     const rows = await this.hourProfileRepo.find({
-      where: UNUSUAL_HOUR_BUCKETS.map((hourBucket) => ({
+      where: {
         userId: ctx.userId,
-        hourBucket,
-      })) as never,
+        hourBucket: In(UNUSUAL_HOUR_BUCKETS),
+      },
     });
     let prior = 0;
     for (const r of rows) {
@@ -423,16 +436,27 @@ export class FraudRuleEngineService {
       await this.knownDeviceRepo.save(existing);
       return;
     }
-    await this.knownDeviceRepo.save(
-      this.knownDeviceRepo.create({
-        userId: ctx.userId,
-        deviceId: ctx.deviceId?.trim() || null,
-        deviceFingerprint: fp,
-        metadata: null,
-        firstSeenAt: now,
-        lastSeenAt: now,
-      }),
-    );
+    try {
+      await this.knownDeviceRepo.save(
+        this.knownDeviceRepo.create({
+          userId: ctx.userId,
+          deviceId: ctx.deviceId?.trim() || null,
+          deviceFingerprint: fp,
+          metadata: null,
+          firstSeenAt: now,
+          lastSeenAt: now,
+        }),
+      );
+    } catch (e) {
+      if (
+        e instanceof QueryFailedError &&
+        (e as { driverError?: { code?: string } }).driverError?.code ===
+          '23505'
+      ) {
+        return;
+      }
+      throw e;
+    }
   }
 
   private async bumpHourHistogram(ctx: FraudEvaluationContext): Promise<void> {
