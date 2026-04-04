@@ -1,13 +1,28 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { EntityManager } from 'typeorm';
 import { Account } from '../entities/account.entity';
 import { AccountStatus } from '../enums/account-status.enum';
+import { Currency } from '../enums/currency.enum';
 import { CreateAccountDto } from '../dto/create-account.dto';
 import { UpdateAccountStatusDto } from '../dto/update-account-status.dto';
 import { AccountRepository } from '../repositories/account.repository';
+
+const PROJECTION_SCALE = 10_000n;
+
+/**
+ * One ledger line’s effect on an account projection (4dp scaled cents).
+ * CREDIT-positive / DEBIT-negative matches customer-asset wallet semantics.
+ */
+export type LedgerPostedProjectionLine = {
+  accountId: string;
+  currency: Currency;
+  scaledSignedDelta: bigint;
+};
 
 /**
  * Account lifecycle and read API for this bounded context. Uses
@@ -88,4 +103,91 @@ export class AccountsService {
   lockAccountForUpdate(id: string): Promise<Account | null> {
     return this.accounts.lockByIdForUpdate(id);
   }
+
+  /**
+   * Applies ledger-posting deltas to `balance` and `availableBalance` under
+   * `FOR UPDATE` locks (accounts sorted by id for stable lock order).
+   * Must run in the **same** `EntityManager` transaction as ledger inserts.
+   */
+  async applyLedgerPostingProjections(
+    manager: EntityManager,
+    lines: ReadonlyArray<LedgerPostedProjectionLine>,
+  ): Promise<void> {
+    const deltaByAccount = new Map<string, bigint>();
+    const currencyByAccount = new Map<string, Currency>();
+
+    for (const line of lines) {
+      const prev = deltaByAccount.get(line.accountId) ?? 0n;
+      deltaByAccount.set(line.accountId, prev + line.scaledSignedDelta);
+      const existingCur = currencyByAccount.get(line.accountId);
+      if (existingCur !== undefined && existingCur !== line.currency) {
+        throw new BadRequestException(
+          'Mixed currencies on the same account in one posting',
+        );
+      }
+      currencyByAccount.set(line.accountId, line.currency);
+    }
+
+    const sortedIds = [...deltaByAccount.keys()].sort();
+    const updated: Account[] = [];
+
+    for (const id of sortedIds) {
+      const account = await manager.findOne(Account, {
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!account) {
+        throw new NotFoundException(
+          `Account ${id} not found for ledger projection`,
+        );
+      }
+      const expectedCurrency = currencyByAccount.get(id)!;
+      if (account.currency !== expectedCurrency) {
+        throw new BadRequestException(
+          'Ledger line currency does not match account currency',
+        );
+      }
+
+      const delta = deltaByAccount.get(id)!;
+      const newBalance = parseScaledDecimal(account.balance) + delta;
+      const newAvailable = parseScaledDecimal(account.availableBalance) + delta;
+      const overdraftCap = parseScaledDecimal(account.overdraftLimit);
+
+      if (newAvailable < -overdraftCap) {
+        throw new BadRequestException(
+          'Insufficient available balance for this ledger posting',
+        );
+      }
+
+      account.balance = formatScaledDecimal(newBalance);
+      account.availableBalance = formatScaledDecimal(newAvailable);
+      updated.push(account);
+    }
+
+    await manager.save(Account, updated);
+  }
+}
+
+function parseScaledDecimal(s: string): bigint {
+  const t = s.trim();
+  const m = /^(-?)(\d+)(?:\.(\d{0,4}))?$/.exec(t);
+  if (!m) {
+    throw new BadRequestException(`Invalid decimal amount: ${s}`);
+  }
+  const sign = m[1] === '-' ? -1n : 1n;
+  const intPart = m[2];
+  const fracRaw = m[3] ?? '';
+  const frac = (fracRaw + '0000').slice(0, 4);
+  const mag = BigInt(intPart) * PROJECTION_SCALE + BigInt(frac);
+  return sign * mag;
+}
+
+function formatScaledDecimal(value: bigint): string {
+  const neg = value < 0n;
+  const v = neg ? -value : value;
+  const intPart = v / PROJECTION_SCALE;
+  const frac = v % PROJECTION_SCALE;
+  const fracStr = frac.toString().padStart(4, '0').replace(/0+$/, '');
+  const base = fracStr.length > 0 ? `${intPart}.${fracStr}` : `${intPart}`;
+  return neg ? `-${base}` : base;
 }

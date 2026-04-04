@@ -10,6 +10,7 @@ import {
   Matches,
   MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 import { Currency } from '../../accounts/enums/currency.enum';
@@ -77,14 +78,22 @@ export class PostLedgerTransactionDto {
   @IsUUID('4')
   reversesTransactionId?: string;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    minLength: 8,
     maxLength: 128,
-    description: 'Idempotency / tracing key from the caller',
+    example: 'payment:a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    description:
+      'Required idempotency key for this posting; MUST be stable across ' +
+      'retries (e.g. `payment:<uuid>`). Enforced unique in the database.',
   })
-  @IsOptional()
   @IsString()
+  @MinLength(8)
   @MaxLength(128)
-  correlationId?: string;
+  @Matches(/^[A-Za-z0-9._:-]+$/, {
+    message:
+      'correlationId must be URL-safe (letters, digits, ., _, -, :)',
+  })
+  correlationId: string;
 
   @ApiPropertyOptional({ maxLength: 512 })
   @IsOptional()

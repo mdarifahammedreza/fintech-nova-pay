@@ -1,5 +1,12 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import {
+  IsOptional,
+  IsString,
+  IsUUID,
+  Matches,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 /**
  * Intent to reverse a **posted** ledger transaction. The ledger service loads
@@ -15,14 +22,21 @@ export class ReverseLedgerTransactionDto {
   @IsUUID('4')
   originalLedgerTransactionId: string;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    minLength: 8,
     maxLength: 128,
-    description: 'Idempotency / tracing key for the reversal attempt',
+    example: 'reversal:tx-a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    description:
+      'Required idempotency key for this reversal; stable across retries.',
   })
-  @IsOptional()
   @IsString()
+  @MinLength(8)
   @MaxLength(128)
-  correlationId?: string;
+  @Matches(/^[A-Za-z0-9._:-]+$/, {
+    message:
+      'correlationId must be URL-safe (letters, digits, ., _, -, :)',
+  })
+  correlationId: string;
 
   @ApiPropertyOptional({ maxLength: 512 })
   @IsOptional()

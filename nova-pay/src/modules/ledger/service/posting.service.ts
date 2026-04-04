@@ -3,16 +3,25 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import {
+  DataSource,
+  EntityManager,
+  QueryFailedError,
+} from 'typeorm';
+import { OutboxRepository } from '../../../infrastructure/outbox/outbox.repository';
+import { OutboxRoutingKey } from '../../../infrastructure/outbox/outbox-routing-key.enum';
+import { Account } from '../../accounts/entities/account.entity';
+import { AccountsService } from '../../accounts/service/accounts.service';
 import {
   PostLedgerEntryLineDto,
   PostLedgerTransactionDto,
 } from '../dto/post-ledger-transaction.dto';
+import { LedgerEntry } from '../entities/ledger-entry.entity';
 import { LedgerTransaction } from '../entities/ledger-transaction.entity';
 import { LedgerEntryType } from '../enums/ledger-entry-type.enum';
 import { LedgerTransactionStatus } from '../enums/ledger-transaction-status.enum';
 import { LedgerTransactionType } from '../enums/ledger-transaction-type.enum';
-import { LedgerEntryRepository } from '../repositories/ledger-entry.repository';
-import { LedgerTransactionRepository } from '../repositories/ledger-transaction.repository';
 
 const SCALE_FACTOR = 10_000n;
 
@@ -20,66 +29,102 @@ const SCALE_FACTOR = 10_000n;
  * Financial posting: one {@link LedgerTransaction} and N {@link LedgerEntry}
  * rows per call. Does not mutate historical rows.
  *
- * ## Ordering inside the **shared** money `EntityManager` transaction
+ * **Transaction:** `post()` opens its own PostgreSQL transaction. Payment
+ * orchestration uses {@link postWithSharedManager} with a caller-supplied
+ * `EntityManager` so money + ledger commit atomically.
  *
- * Callers (e.g. payment orchestration) start the TX, hold account locks, and run
- * balance checks **before** calling into here. This service must **not** open
- * its own committing boundary once wired — accept `EntityManager` when ready.
+ * Inside each posting segment, in order:
+ * 1. Required `correlationId`: `FOR UPDATE` lookup; on duplicate insert (`23505`)
+ *    reload and return the committed transaction (no double post).
+ * 2. `FOR UPDATE` lock each affected account; verify `availableBalance` and
+ *    `overdraftLimit` against this posting’s net delta **before** any ledger row
+ *    insert (no pre-check outside this TX).
+ * 3. Ledger header + entry line inserts.
+ * 4. Account projection updates ({@link AccountsService.applyLedgerPostingProjections}).
+ * 5. TODO: Outbox enqueue via `OutboxRepository.enqueueInTransaction`.
  *
- * 1. **Validation** — balanced entries, reversal metadata (pure or same-manager
- *    reads as required).
- * 2. **Ledger persist** — insert transaction header + entry lines atomically
- *    (no committed header without lines).
- * 3. **Balance projections** — update `accounts` for each `accountId` in entries
- *    in the **same** TX (delegation TBD; not implemented here).
- * 4. **Outbox** — `OutboxRepository.enqueueInTransaction` for
- *    `ledger.transaction.posted` (payload from committed-in-TX state only).
- *
- * TODO: Add `post(manager: EntityManager, dto)` (or equivalent) and route all
- * saves through `manager` so steps 2–4 share the caller’s TX.
- * TODO: Wire projection updates and outbox enqueue once account/ledger coupling
- * is injected without cross-module repository leaks.
  * RabbitMQ: only after DB commit via outbox relay — never `emit` here.
  */
 @Injectable()
 export class PostingService {
   constructor(
-    private readonly txRepo: LedgerTransactionRepository,
-    private readonly entryRepo: LedgerEntryRepository,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
+    private readonly accounts: AccountsService,
+    private readonly outbox: OutboxRepository,
   ) {}
 
   /**
    * Validates, persists a new posted bundle, returns header with entries.
-   * Idempotent when `correlationId` matches an existing transaction.
-   *
-   * TODO: Idempotency replay (`findByCorrelationId`) must run under the caller’s
-   * TX / isolation so a concurrent poster cannot race between check and insert.
+   * `correlationId` is required and unique; retries return the same row.
+   * Opens and commits its own transaction (HTTP / reversal callers).
    */
   async post(dto: PostLedgerTransactionDto): Promise<LedgerTransaction> {
-    if (dto.correlationId) {
-      const existing = await this.txRepo.findByCorrelationId(dto.correlationId);
-      if (existing) {
-        const full = await this.txRepo.findWithEntriesById(existing.id);
-        return full ?? existing;
-      }
+    const correlationId = dto.correlationId.trim();
+    if (!correlationId) {
+      throw new BadRequestException('correlationId is required');
+    }
+    return this.dataSource.transaction((manager: EntityManager) =>
+      this.postWithSharedManager(manager, dto, correlationId),
+    );
+  }
+
+  /**
+   * Same as {@link post} but uses the caller’s `EntityManager` (no nested
+   * committing boundary). Payment orchestration uses this for one atomic money
+   * transaction with idempotency + payment rows.
+   */
+  async postWithSharedManager(
+    manager: EntityManager,
+    dto: PostLedgerTransactionDto,
+    correlationId = dto.correlationId.trim(),
+  ): Promise<LedgerTransaction> {
+    if (!correlationId) {
+      throw new BadRequestException('correlationId is required');
+    }
+
+    const existingLocked = await manager.findOne(LedgerTransaction, {
+      where: { correlationId },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (existingLocked) {
+      const full = await loadTxWithEntries(manager, existingLocked.id);
+      return full ?? existingLocked;
     }
 
     this.assertReversalMetadata(dto);
-    await this.assertReversalTargetPosted(dto);
+    await this.assertReversalTargetPosted(manager, dto);
     assertBalancedPerCurrency(dto.entries);
     const lineNumbers = assignLineNumbers(dto.entries);
 
-    // TODO: Steps 2–4 of class-level ordering — use caller `EntityManager` and
-    // include projection + `ledger.transaction.posted` outbox before commit.
-    const tx = await this.txRepo.save({
-      type: dto.type,
-      status: LedgerTransactionStatus.POSTED,
-      reversesTransactionId: dto.reversesTransactionId ?? null,
-      correlationId: dto.correlationId ?? null,
-      memo: dto.memo ?? null,
-    });
+    await this.validateAccountBalancesBeforeLedgerInsert(manager, dto.entries);
 
-    const lines = dto.entries.map((e, i) => ({
+    let tx: LedgerTransaction;
+    try {
+      tx = await manager.save(
+        manager.create(LedgerTransaction, {
+          type: dto.type,
+          status: LedgerTransactionStatus.POSTED,
+          reversesTransactionId: dto.reversesTransactionId ?? null,
+          correlationId,
+          memo: dto.memo ?? null,
+        }),
+      );
+    } catch (err: unknown) {
+      if (!isPostgresUniqueViolation(err)) {
+        throw err;
+      }
+      const winner = await manager.findOne(LedgerTransaction, {
+        where: { correlationId },
+      });
+      if (!winner) {
+        throw err;
+      }
+      const replay = await loadTxWithEntries(manager, winner.id);
+      return replay ?? winner;
+    }
+
+    const lineRows = dto.entries.map((e, i) => ({
       ledgerTransactionId: tx.id,
       accountId: e.accountId,
       entryType: e.entryType,
@@ -89,9 +134,26 @@ export class PostingService {
       memo: e.memo ?? null,
     }));
 
-    await this.entryRepo.saveEntryLines(lines);
+    await manager.save(LedgerEntry, lineRows);
 
-    const result = await this.txRepo.findWithEntriesById(tx.id);
+    const projectionLines = dto.entries.map((e) => ({
+      accountId: e.accountId,
+      currency: e.currency,
+      scaledSignedDelta:
+        e.entryType === LedgerEntryType.CREDIT
+          ? parseScaledAmount(e.amount)
+          : -parseScaledAmount(e.amount),
+    }));
+
+    await this.accounts.applyLedgerPostingProjections(
+      manager,
+      projectionLines,
+    );
+
+    // TODO: `OutboxRepository.enqueueInTransaction(manager, …)` for
+    // `ledger.transaction.posted` before this transaction commits.
+
+    const result = await loadTxWithEntries(manager, tx.id);
     if (!result) {
       throw new NotFoundException('Posted transaction not found after save');
     }
@@ -114,13 +176,76 @@ export class PostingService {
     }
   }
 
+  /**
+   * Locks every account touched by the bundle (sorted id order), then ensures
+   * `availableBalance + netDelta >= -overdraftLimit` for each — same TX as the
+   * subsequent ledger inserts (architecture: never split check vs post).
+   */
+  private async validateAccountBalancesBeforeLedgerInsert(
+    manager: EntityManager,
+    entries: PostLedgerEntryLineDto[],
+  ): Promise<void> {
+    const deltaByAccount = new Map<string, bigint>();
+    const currencyByAccount = new Map<string, PostLedgerEntryLineDto['currency']>();
+
+    for (const e of entries) {
+      const mag = parseScaledAmount(e.amount);
+      const signed =
+        e.entryType === LedgerEntryType.CREDIT ? mag : -mag;
+      deltaByAccount.set(
+        e.accountId,
+        (deltaByAccount.get(e.accountId) ?? 0n) + signed,
+      );
+      const prevCur = currencyByAccount.get(e.accountId);
+      if (prevCur !== undefined && prevCur !== e.currency) {
+        throw new BadRequestException(
+          'Mixed currencies on the same account in one posting',
+        );
+      }
+      currencyByAccount.set(e.accountId, e.currency);
+    }
+
+    const sortedIds = [...deltaByAccount.keys()].sort();
+
+    for (const id of sortedIds) {
+      const account = await manager.findOne(Account, {
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!account) {
+        throw new NotFoundException(
+          `Account ${id} not found for ledger posting`,
+        );
+      }
+      const expectedCurrency = currencyByAccount.get(id)!;
+      if (account.currency !== expectedCurrency) {
+        throw new BadRequestException(
+          'Ledger line currency does not match account currency',
+        );
+      }
+
+      const netDelta = deltaByAccount.get(id)!;
+      const availableScaled = parseScaledBalanceField(account.availableBalance);
+      const overdraftScaled = parseScaledBalanceField(account.overdraftLimit);
+
+      if (availableScaled + netDelta < -overdraftScaled) {
+        throw new BadRequestException(
+          'Insufficient available balance for this ledger posting',
+        );
+      }
+    }
+  }
+
   private async assertReversalTargetPosted(
+    manager: EntityManager,
     dto: PostLedgerTransactionDto,
   ): Promise<void> {
     if (dto.type !== LedgerTransactionType.REVERSAL || !dto.reversesTransactionId) {
       return;
     }
-    const target = await this.txRepo.findById(dto.reversesTransactionId);
+    const target = await manager.findOne(LedgerTransaction, {
+      where: { id: dto.reversesTransactionId },
+    });
     if (!target) {
       throw new NotFoundException('Reversal target transaction not found');
     }
@@ -130,6 +255,18 @@ export class PostingService {
       );
     }
   }
+}
+
+function loadTxWithEntries(
+  manager: EntityManager,
+  id: string,
+): Promise<LedgerTransaction | null> {
+  return manager
+    .createQueryBuilder(LedgerTransaction, 'tx')
+    .leftJoinAndSelect('tx.entries', 'e')
+    .where('tx.id = :id', { id })
+    .orderBy('e.lineNumber', 'ASC')
+    .getOne();
 }
 
 function parseScaledAmount(amount: string): bigint {
@@ -142,6 +279,21 @@ function parseScaledAmount(amount: string): bigint {
   const fracRaw = m[2] ?? '';
   const frac = (fracRaw + '0000').slice(0, 4);
   return BigInt(intPart) * SCALE_FACTOR + BigInt(frac);
+}
+
+/** Ledger entry amounts are positive; account columns may be negative. */
+function parseScaledBalanceField(s: string): bigint {
+  const t = s.trim();
+  const m = /^(-?)(\d+)(?:\.(\d{0,4}))?$/.exec(t);
+  if (!m) {
+    throw new BadRequestException(`Invalid decimal: ${s}`);
+  }
+  const sign = m[1] === '-' ? -1n : 1n;
+  const intPart = m[2];
+  const fracRaw = m[3] ?? '';
+  const frac = (fracRaw + '0000').slice(0, 4);
+  const mag = BigInt(intPart) * SCALE_FACTOR + BigInt(frac);
+  return sign * mag;
 }
 
 function assertBalancedPerCurrency(entries: PostLedgerEntryLineDto[]): void {
@@ -186,4 +338,13 @@ function assignLineNumbers(entries: PostLedgerEntryLineDto[]): number[] {
   throw new BadRequestException(
     'lineNumber must be provided for all lines or omitted for all',
   );
+}
+
+function isPostgresUniqueViolation(err: unknown): boolean {
+  if (!(err instanceof QueryFailedError)) {
+    return false;
+  }
+  const driver = (err as QueryFailedError & { driverError?: { code?: string } })
+    .driverError;
+  return driver?.code === '23505';
 }

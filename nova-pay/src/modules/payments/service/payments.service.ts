@@ -142,7 +142,9 @@ export class PaymentsService {
   /**
    * Terminal failure: marks both payment and idempotency slot so retries replay
    * the same outcome without re-posting to the ledger.
-   * TODO: Same PostgreSQL transaction as payment update + outbox `payment.failed`.
+   * TODO: Same money TX as any compensating writes / outbox `payment.failed`;
+   * if ledger posted in the same attempt, failure handling must follow policy
+   * (reversal or mark-only) — not decided here.
    */
   async markPaymentFailedWithIdempotency(
     payment: Payment,

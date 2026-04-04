@@ -2,8 +2,8 @@ import {
   Column,
   CreateDateColumn,
   Entity,
-  Index,
   PrimaryGeneratedColumn,
+  Unique,
   UpdateDateColumn,
 } from 'typeorm';
 
@@ -25,7 +25,7 @@ export enum IdempotencyRecordStatus {
 }
 
 @Entity({ name: 'payments_idempotency_records' })
-@Index(['idempotencyKey', 'scopeKey'], { unique: true })
+@Unique('payments_idempotency_key_scope', ['idempotencyKey', 'scopeKey'])
 export class IdempotencyRecord {
   @PrimaryGeneratedColumn('uuid')
   id: string;

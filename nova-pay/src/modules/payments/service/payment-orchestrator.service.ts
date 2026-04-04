@@ -2,64 +2,57 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  NotFoundException,
 } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
 import { createHash } from 'node:crypto';
-import { QueryFailedError } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  QueryFailedError,
+} from 'typeorm';
+import { OutboxRepository } from '../../../infrastructure/outbox/outbox.repository';
+import { OutboxRoutingKey } from '../../../infrastructure/outbox/outbox-routing-key.enum';
+import { Account } from '../../accounts/entities/account.entity';
 import { AccountStatus } from '../../accounts/enums/account-status.enum';
-import { AccountsService } from '../../accounts/service/accounts.service';
 import { PostLedgerTransactionDto } from '../../ledger/dto/post-ledger-transaction.dto';
 import { LedgerEntryType } from '../../ledger/enums/ledger-entry-type.enum';
 import { LedgerTransactionType } from '../../ledger/enums/ledger-transaction-type.enum';
 import { PostingService } from '../../ledger/service/posting.service';
 import { CreatePaymentDto } from '../dto/create-payment.dto';
-import { IdempotencyRecord } from '../entities/idempotency-record.entity';
+import {
+  IdempotencyRecord,
+  IdempotencyRecordStatus,
+} from '../entities/idempotency-record.entity';
 import { Payment } from '../entities/payment.entity';
 import { PaymentStatus } from '../enums/payment-status.enum';
 import { PaymentType } from '../enums/payment-type.enum';
-import { PaymentsService } from './payments.service';
+import { IdempotencyRecordRepository } from '../repositories/idempotency-record.repository';
 
 /**
  * Coordinates payment intent → account checks → ledger post → payment outcome
- * using **exported** {@link AccountsService} and {@link PostingService} only.
+ * using {@link PostingService} and the shared `DataSource` transaction only.
  *
- * ## Money-path transaction design (NovaPay architecture)
+ * ## Money-path transaction (NovaPay architecture)
  *
- * **Current code:** multiple round-trips/commits between idempotency, payment
- * `PROCESSING`, ledger, finalize/fail — **not** production-safe until collapsed.
+ * `submitPayment` runs idempotency resolution, payment `PROCESSING`, ledger post
+ * (header + entries + account projections), and terminal payment + idempotency
+ * updates in **one** PostgreSQL transaction via `DataSource.transaction`.
  *
- * **Target ordering inside one PostgreSQL transaction** (single
- * `EntityManager` / query runner), after read-only short-circuit for payments
- * already `COMPLETED` or `FAILED`:
+ * **Idempotency:** `resolveIdempotencySlot` uses `FOR UPDATE` + DB unique on
+ * `(idempotency_key, scope_key)` under the same `EntityManager`; races reload
+ * and return the same payment row.
  *
- * 1. **Transaction start** — open the TX here (or one layer below with this
- *    orchestrator receiving `EntityManager`), before any durable write that must
- *    roll back with the ledger.
- * 2. **Idempotency row** — `SELECT … FROM payments_idempotency_records … FOR UPDATE`
- *    (and payment row materialization / fingerprint updates as needed) so
- *    concurrent retries serialize on the slot.
- * 3. **Account row locks** — `AccountsService.lockAccountForUpdate` on the debit
- *    source (required) and further accounts per policy **before** balance read
- *    and **before** ledger insert.
- * 4. **Balance / policy** — read `availableBalance` and overdraft rules with locks
- *    held; reject if insufficient (never validate in a different TX than post).
- * 5. **Ledger posting** — `PostingService.post` must run on the **same** manager
- *    (see ledger service TODOs): header + entries in one atomic write segment.
- * 6. **Balance projections** — update `accounts` projection columns from entry
- *    lines in that same TX (not implemented elsewhere yet).
- * 7. **Payment + idempotency outcome** — `COMPLETED` + `ledgerTransactionId` + slot
- *    `COMPLETED`, or failure path without a second ledger post.
- * 8. **Outbox** — `OutboxRepository.enqueueInTransaction` for `payment.*` and any
- *    `ledger.*` rows not already written inside `PostingService` in the same TX.
- * 9. **Commit** — RabbitMQ only after commit via outbox relay.
- *
- * TODO: **Fraud** — synchronous policy checks before step 5 with locks held.
+ * TODO: **Fraud** — synchronous policy checks before ledger with locks held.
+ * TODO: **Outbox** — enqueue `payment.*` / `ledger.*` before commit.
  */
 @Injectable()
 export class PaymentOrchestratorService {
   constructor(
-    private readonly payments: PaymentsService,
-    private readonly accounts: AccountsService,
     private readonly posting: PostingService,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
+    private readonly idempotencyRepo: IdempotencyRecordRepository,
   ) {}
 
   /**
@@ -71,78 +64,110 @@ export class PaymentOrchestratorService {
     const scopeKey = dto.idempotencyScopeKey ?? '';
     const fingerprint = fingerprintCreatePayment(dto);
 
-    const { idempotencyRecord, payment } = await this.resolveIdempotencySlot(
-      dto,
-      scopeKey,
-      fingerprint,
-    );
+    return this.dataSource.transaction(async (manager: EntityManager) => {
+      const { idempotencyRecord, payment } =
+        await this.resolveIdempotencySlot(
+          manager,
+          dto,
+          scopeKey,
+          fingerprint,
+        );
 
-    if (payment.status === PaymentStatus.COMPLETED) {
-      return payment;
-    }
-    if (payment.status === PaymentStatus.FAILED) {
-      return payment;
-    }
+      if (payment.status === PaymentStatus.COMPLETED) {
+        return payment;
+      }
+      if (payment.status === PaymentStatus.FAILED) {
+        return payment;
+      }
 
-    // TODO: Move pre-lock reads inside the money TX or repeat them after locks;
-    // today these are unconstrained reads (see class-level phase 3–4).
-    const source = await this.accounts.requireAccountById(dto.sourceAccountId);
-    const dest = await this.accounts.requireAccountById(
-      dto.destinationAccountId,
-    );
-    this.assertAccountsReady(source, dest, dto);
+      const source = await manager.findOne(Account, {
+        where: { id: dto.sourceAccountId },
+      });
+      const dest = await manager.findOne(Account, {
+        where: { id: dto.destinationAccountId },
+      });
+      if (!source) {
+        throw new NotFoundException('Source account not found');
+      }
+      if (!dest) {
+        throw new NotFoundException('Destination account not found');
+      }
+      this.assertAccountsReady(source, dest, dto);
 
-    // TODO: Phase 2–7 — set `PROCESSING` under idempotency `FOR UPDATE`, not as a
-    // standalone commit before ledger (avoids orphan PROCESSING if process dies).
-    payment.status = PaymentStatus.PROCESSING;
-    await this.payments.savePayment(payment);
+      payment.status = PaymentStatus.PROCESSING;
+      await manager.save(Payment, payment);
 
-    const ledgerDto = this.buildLedgerPostDto(dto, payment.id);
+      const ledgerDto = this.buildLedgerPostDto(dto, payment.id);
 
-    try {
-      // TODO: Phases 3–6 — `lockAccountForUpdate` → balance check →
-      // `posting.post(entityManager, …)` → projection updates (same TX).
-      // TODO: Phase 8 — outbox rows for `ledger.transaction.posted` / `payment.completed`
-      // before commit (see `PaymentsService.finalizeSuccessfulPayment`).
-      const ledgerTx = await this.posting.post(ledgerDto);
-      return this.payments.finalizeSuccessfulPayment(
-        payment,
-        idempotencyRecord,
-        ledgerTx.id,
-      );
-    } catch (err: unknown) {
-      // TODO: Phase 7–8 — failure updates + `payment.failed` outbox in the same TX
-      // as any partial ledger work, or compensate per policy (no fake rollback here).
-      await this.payments.markPaymentFailedWithIdempotency(
-        payment,
-        idempotencyRecord,
-      );
-      throw err;
-    }
+      try {
+        const ledgerTx = await this.posting.postWithSharedManager(
+          manager,
+          ledgerDto,
+        );
+        payment.status = PaymentStatus.COMPLETED;
+        payment.ledgerTransactionId = ledgerTx.id;
+        idempotencyRecord.status = IdempotencyRecordStatus.COMPLETED;
+        await manager.save(IdempotencyRecord, idempotencyRecord);
+        return manager.save(Payment, payment);
+      } catch (err: unknown) {
+        payment.status = PaymentStatus.FAILED;
+        idempotencyRecord.status = IdempotencyRecordStatus.FAILED;
+        await manager.save(IdempotencyRecord, idempotencyRecord);
+        await manager.save(Payment, payment);
+        throw err;
+      }
+    });
   }
 
+  /**
+   * Lock or create idempotency row, materialize payment, fingerprint rules.
+   * Unique violations → load winner and return same outcome (same request → same
+   * result). Must run on the caller’s `EntityManager` (money transaction).
+   */
   private async resolveIdempotencySlot(
+    manager: EntityManager,
     dto: CreatePaymentDto,
     scopeKey: string,
     fingerprint: string,
   ): Promise<{ idempotencyRecord: IdempotencyRecord; payment: Payment }> {
-    let record = await this.payments.findIdempotencyByKey(
+    let record = await this.idempotencyRepo.findByIdempotencyKeyForUpdate(
+      manager,
       dto.idempotencyKey,
       scopeKey,
     );
 
-    if (record?.requestFingerprint && record.requestFingerprint !== fingerprint) {
+    if (
+      record?.requestFingerprint &&
+      record.requestFingerprint !== fingerprint
+    ) {
       throw new ConflictException(
         'Idempotency key already used with a different request body',
       );
     }
 
     if (!record) {
-      record = await this.tryCreateIdempotencySlot(
-        dto.idempotencyKey,
-        scopeKey,
-        fingerprint,
-      );
+      try {
+        record = await this.idempotencyRepo.insertPendingInTransaction(
+          manager,
+          {
+            idempotencyKey: dto.idempotencyKey,
+            scopeKey,
+            requestFingerprint: fingerprint,
+          },
+        );
+      } catch (err: unknown) {
+        if (!isPostgresUniqueViolation(err)) {
+          throw err;
+        }
+        record = await this.idempotencyRepo.findByIdempotencyKeyInTransaction(
+          manager,
+          dto.idempotencyKey,
+          scopeKey,
+        );
+        if (!record) {
+          throw err;
+        }
+      }
     }
 
     if (
@@ -154,17 +179,31 @@ export class PaymentOrchestratorService {
       );
     }
 
-    let payment = await this.payments.findPaymentByIdempotencyRecordId(
-      record.id,
-    );
+    let payment = await manager.findOne(Payment, {
+      where: { idempotencyRecordId: record.id },
+    });
 
     if (!payment) {
-      payment = await this.payments.createPaymentFromDto(record.id, dto);
-      await this.payments.linkIdempotencyToCreatedPayment(
-        record,
-        payment,
-        dto.reference,
-      );
+      try {
+        const created = manager.create(
+          Payment,
+          newPaymentFromDto(record.id, dto),
+        );
+        payment = await manager.save(created);
+        record.linkedPaymentId = payment.id;
+        record.businessReference = dto.reference;
+        await manager.save(IdempotencyRecord, record);
+      } catch (err: unknown) {
+        if (!isPostgresUniqueViolation(err)) {
+          throw err;
+        }
+        payment = await manager.findOne(Payment, {
+          where: { idempotencyRecordId: record.id },
+        });
+        if (!payment) {
+          throw err;
+        }
+      }
     }
 
     if (payment.status === PaymentStatus.COMPLETED) {
@@ -179,41 +218,10 @@ export class PaymentOrchestratorService {
       record.requestFingerprint === undefined
     ) {
       record.requestFingerprint = fingerprint;
-      await this.payments.saveIdempotencyRecord(record);
+      await manager.save(IdempotencyRecord, record);
     }
 
     return { idempotencyRecord: record, payment };
-  }
-
-  /**
-   * Inserts a new idempotency row; on unique-key races, reloads the winner row.
-   * TODO: Fold into phase 2 of the money TX (`INSERT` / `SELECT … FOR UPDATE`),
-   * not as a separate commit before the transactional boundary starts.
-   */
-  private async tryCreateIdempotencySlot(
-    idempotencyKey: string,
-    scopeKey: string,
-    fingerprint: string,
-  ): Promise<IdempotencyRecord> {
-    try {
-      return await this.payments.createIdempotencyPending(
-        idempotencyKey,
-        scopeKey,
-        fingerprint,
-      );
-    } catch (err: unknown) {
-      if (!isPostgresUniqueViolation(err)) {
-        throw err;
-      }
-      const existing = await this.payments.findIdempotencyByKey(
-        idempotencyKey,
-        scopeKey,
-      );
-      if (!existing) {
-        throw err;
-      }
-      return existing;
-    }
   }
 
   private assertAccountsReady(
@@ -257,6 +265,25 @@ export class PaymentOrchestratorService {
       entries,
     };
   }
+}
+
+function newPaymentFromDto(
+  idempotencyRecordId: string,
+  dto: CreatePaymentDto,
+): Partial<Payment> {
+  return {
+    type: dto.type,
+    status: PaymentStatus.PENDING,
+    reference: dto.reference,
+    idempotencyRecordId,
+    sourceAccountId: dto.sourceAccountId,
+    destinationAccountId: dto.destinationAccountId,
+    amount: dto.amount,
+    currency: dto.currency,
+    ledgerTransactionId: null,
+    correlationId: dto.correlationId ?? null,
+    memo: dto.memo ?? null,
+  };
 }
 
 function ledgerTypeForPayment(type: PaymentType): LedgerTransactionType {

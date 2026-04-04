@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { OutboxModule } from '../../infrastructure/outbox/outbox.module';
+import { AccountsModule } from '../accounts/accounts.module';
 import { PostLedgerTransactionHandler } from './command/handlers/post-ledger-transaction.handler';
 import { ReverseLedgerTransactionHandler } from './command/handlers/reverse-ledger-transaction.handler';
 import { LedgerController } from './controller/ledger.controller';
@@ -18,7 +20,10 @@ import { ReversalService } from './service/reversal.service';
  * stay inside this module (HTTP handlers + internal services).
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([LedgerTransaction, LedgerEntry])],
+  imports: [
+    TypeOrmModule.forFeature([LedgerTransaction, LedgerEntry]),
+    AccountsModule,
+  ],
   controllers: [LedgerController],
   providers: [
     LedgerTransactionRepository,

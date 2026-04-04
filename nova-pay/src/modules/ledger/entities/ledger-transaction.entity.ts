@@ -5,6 +5,7 @@ import {
   Index,
   OneToMany,
   PrimaryGeneratedColumn,
+  Unique,
 } from 'typeorm';
 import { LedgerEntry } from './ledger-entry.entity';
 import { LedgerTransactionStatus } from '../enums/ledger-transaction-status.enum';
@@ -16,9 +17,9 @@ import { LedgerTransactionType } from '../enums/ledger-transaction-type.enum';
  * updates to historical data.
  */
 @Entity({ name: 'ledger_transactions' })
+@Unique('ledger_transactions_correlation_id', ['correlationId'])
 @Index(['status'])
 @Index(['type'])
-@Index(['correlationId'])
 export class LedgerTransaction {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -49,15 +50,11 @@ export class LedgerTransaction {
   reversesTransactionId: string | null;
 
   /**
-   * Idempotency / tracing key from the posting caller (payment, job, …).
+   * Required idempotency key per posting attempt (caller-stable across retries).
+   * Globally unique; DB enforces `UNIQUE` for concurrency-safe replay.
    */
-  @Column({
-    name: 'correlation_id',
-    type: 'varchar',
-    length: 128,
-    nullable: true,
-  })
-  correlationId: string | null;
+  @Column({ name: 'correlation_id', type: 'varchar', length: 128 })
+  correlationId: string;
 
   @Column({ type: 'varchar', length: 512, nullable: true })
   memo: string | null;

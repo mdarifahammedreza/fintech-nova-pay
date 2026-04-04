@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { OutboxModule } from '../../infrastructure/outbox/outbox.module';
 import { AccountsModule } from '../accounts/accounts.module';
 import { LedgerModule } from '../ledger/ledger.module';
 import { CreatePaymentHandler } from './command/handlers/create-payment.handler';
