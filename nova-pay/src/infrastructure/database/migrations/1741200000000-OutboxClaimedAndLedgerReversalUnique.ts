@@ -24,9 +24,17 @@ export class OutboxClaimedAndLedgerReversalUnique1741200000000
       ADD COLUMN IF NOT EXISTS "claimed_at" TIMESTAMPTZ NULL;
     `);
     await queryRunner.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS "uq_ledger_reversal_per_original"
-      ON "ledger_transactions" ("reverses_transaction_id")
-      WHERE type = 'REVERSAL' AND reverses_transaction_id IS NOT NULL;
+      DO $do$ BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.tables
+          WHERE table_schema = 'public'
+            AND table_name = 'ledger_transactions'
+        ) THEN
+          CREATE UNIQUE INDEX IF NOT EXISTS "uq_ledger_reversal_per_original"
+          ON "ledger_transactions" ("reverses_transaction_id")
+          WHERE type = 'REVERSAL' AND reverses_transaction_id IS NOT NULL;
+        END IF;
+      END $do$;
     `);
   }
 
