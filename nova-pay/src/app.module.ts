@@ -2,6 +2,11 @@ import { DynamicModule, Module, Type } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { DatabaseModule } from './infrastructure/database/database.module';
+import { AccountsModule } from './modules/accounts/accounts.module';
+import { AuthModule } from './modules/auth/auth.module';
+import { LedgerModule } from './modules/ledger/ledger.module';
+import { PaymentsModule } from './modules/payments/payments.module';
 
 type Importable =
   | Type<unknown>
@@ -10,15 +15,18 @@ type Importable =
 
 /**
  * Infrastructure roots (infrastructure/database, messaging, cache, …).
- * Add DatabaseModule, RabbitmqModule, RedisModule, etc. when implemented.
  */
-const infrastructureImports: Importable[] = [];
+const infrastructureImports: Importable[] = [DatabaseModule];
 
 /**
- * Feature module roots (modules/*).
- * Add AuthModule, UsersModule, AccountsModule, … when implemented.
+ * Feature module roots (`UsersModule` is pulled in via `AuthModule`).
  */
-const featureModules: Importable[] = [];
+const featureModules: Importable[] = [
+  AuthModule,
+  AccountsModule,
+  LedgerModule,
+  PaymentsModule,
+];
 
 @Module({
   imports: [
