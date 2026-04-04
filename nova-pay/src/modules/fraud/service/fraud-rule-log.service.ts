@@ -1,12 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import { FraudSignal } from '../entities/fraud-signal.entity';
 import { RiskDecision } from '../entities/risk-decision.entity';
 import { FraudDecisionState } from '../enums/fraud-decision-state.enum';
 import { FraudRuleResult } from '../enums/fraud-rule-result.enum';
 import { FraudEvaluationContext } from '../interfaces/fraud-evaluation-context.interface';
 import { FraudRuleEvaluationResult } from '../interfaces/fraud-rule-evaluation-result.interface';
+import { RiskDecisionRepository } from '../repositories/risk-decision.repository';
 
 export interface FraudAggregateSnapshot {
   finalDecision: FraudDecisionState;
@@ -20,19 +19,14 @@ export interface FraudAggregateSnapshot {
  */
 @Injectable()
 export class FraudRuleLogService {
-  constructor(
-    @InjectRepository(RiskDecision)
-    private readonly riskRepo: Repository<RiskDecision>,
-    @InjectRepository(FraudSignal)
-    private readonly signalRepo: Repository<FraudSignal>,
-  ) {}
+  constructor(private readonly riskRepo: RiskDecisionRepository) {}
 
   async persistRiskDecisionAndSignals(
     ctx: FraudEvaluationContext,
     ruleResults: FraudRuleEvaluationResult[],
     aggregate: FraudAggregateSnapshot,
   ): Promise<RiskDecision> {
-    const decision = this.riskRepo.create({
+    const decisionProps: Partial<RiskDecision> = {
       finalDecision: aggregate.finalDecision,
       userId: ctx.userId,
       sourceAccountId: ctx.sourceAccountId,
@@ -46,11 +40,9 @@ export class FraudRuleLogService {
       finalReasons: aggregate.finalReasons,
       triggeredRuleTypes: aggregate.triggeredRuleTypes,
       engineMetadata: aggregate.engineMetadata,
-    });
-    const savedDecision = await this.riskRepo.save(decision);
-    const signals = ruleResults.map((r) =>
-      this.signalRepo.create({
-        riskDecisionId: savedDecision.id,
+    };
+    const signalPropsList = ruleResults.map(
+      (r): Partial<FraudSignal> => ({
         userId: ctx.userId,
         sourceAccountId: ctx.sourceAccountId,
         destinationAccountId: ctx.destinationAccountId,
@@ -70,7 +62,6 @@ export class FraudRuleLogService {
           r.evidence && Object.keys(r.evidence).length > 0 ? r.evidence : {},
       }),
     );
-    await this.signalRepo.save(signals);
-    return savedDecision;
+    return this.riskRepo.saveWithRuleSignals(decisionProps, signalPropsList);
   }
 }

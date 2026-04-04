@@ -1,9 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { In, QueryFailedError, Repository } from 'typeorm';
+import { In, QueryFailedError } from 'typeorm';
 import { RedisService } from '../../../infrastructure/cache/redis.service';
-import { KnownDevice } from '../entities/known-device.entity';
-import { UserTransactionHourProfile } from '../entities/user-transaction-hour-profile.entity';
+import { KnownDeviceRepository } from '../repositories/known-device.repository';
+import { UserTransactionHourProfileRepository } from '../repositories/user-transaction-hour-profile.repository';
 import { FraudDecisionState } from '../enums/fraud-decision-state.enum';
 import { FraudRuleResult } from '../enums/fraud-rule-result.enum';
 import { FraudRuleType } from '../enums/fraud-rule-type.enum';
@@ -32,10 +31,8 @@ export class FraudRuleEngineService {
 
   constructor(
     private readonly redis: RedisService,
-    @InjectRepository(KnownDevice)
-    private readonly knownDeviceRepo: Repository<KnownDevice>,
-    @InjectRepository(UserTransactionHourProfile)
-    private readonly hourProfileRepo: Repository<UserTransactionHourProfile>,
+    private readonly knownDeviceRepo: KnownDeviceRepository,
+    private readonly hourProfileRepo: UserTransactionHourProfileRepository,
   ) {}
 
   /**
@@ -47,17 +44,21 @@ export class FraudRuleEngineService {
     results: FraudRuleEvaluationResult[];
     timedOut: boolean;
   }> {
+    const ac = new AbortController();
     const work = Promise.all([
-      this.ruleVelocity(ctx),
+      this.ruleVelocity(ctx, ac.signal),
       this.ruleLargeTransaction(ctx),
       this.ruleNewDeviceLargeAmount(ctx),
       this.ruleUnusualHour(ctx),
-      this.ruleRecipientVelocity(ctx),
+      this.ruleRecipientVelocity(ctx, ac.signal),
     ]).then((r) => ({ tag: 'ok' as const, rows: r }));
-    const timeout = this.delay(ENGINE_BUDGET_MS).then(() => ({
-      tag: 'timeout' as const,
-      rows: this.allRulesTimeoutSynthetic(),
-    }));
+    const timeout = this.delay(ENGINE_BUDGET_MS).then(() => {
+      ac.abort();
+      return {
+        tag: 'timeout' as const,
+        rows: this.allRulesTimeoutSynthetic(),
+      };
+    });
     const outcome = await Promise.race([work, timeout]);
     const timedOut = outcome.tag === 'timeout';
     if (timedOut) {
@@ -111,9 +112,40 @@ export class FraudRuleEngineService {
     return id || null;
   }
 
-  private parseAmount(amount: string): number {
+  private parseAmount(amount: string): number | null {
     const n = Number.parseFloat(amount);
-    return Number.isFinite(n) ? n : 0;
+    return Number.isFinite(n) ? n : null;
+  }
+
+  private invalidAmountResult(
+    ruleType: FraudRuleType,
+    amount: string,
+    t0: number,
+  ): FraudRuleEvaluationResult {
+    return this.errorResult(
+      ruleType,
+      'INVALID_AMOUNT',
+      'Amount is not a finite decimal string',
+      { amount },
+      Date.now() - t0,
+    );
+  }
+
+  private supersededRedisRuleResult(
+    ruleType: FraudRuleType,
+    reasonCode: string,
+    evidence: Record<string, unknown>,
+    t0: number,
+  ): FraudRuleEvaluationResult {
+    return {
+      ruleType,
+      result: FraudRuleResult.NOT_TRIGGERED,
+      recommendedDecision: FraudDecisionState.APPROVED,
+      reasonCode,
+      message: 'Skipped Redis mutation after evaluation budget',
+      evidence,
+      durationMs: Date.now() - t0,
+    };
   }
 
   /**
@@ -123,6 +155,7 @@ export class FraudRuleEngineService {
    */
   private async ruleVelocity(
     ctx: FraudEvaluationContext,
+    signal: AbortSignal,
   ): Promise<FraudRuleEvaluationResult> {
     const t0 = Date.now();
     const ruleType = FraudRuleType.VELOCITY;
@@ -137,12 +170,36 @@ export class FraudRuleEngineService {
           Date.now() - t0,
         );
       }
+      if (signal.aborted) {
+        return this.supersededRedisRuleResult(
+          ruleType,
+          'EVALUATION_SUPERSEDED',
+          {},
+          t0,
+        );
+      }
       const key = `fraud:velocity:z:${ctx.userId}`;
       const now = Date.now();
       const minScore = now - VELOCITY_WINDOW_MS;
       const member = `${ctx.correlationId}:${ctx.paymentReference}`;
       await client.zremrangebyscore(key, 0, minScore - 1);
+      if (signal.aborted) {
+        return this.supersededRedisRuleResult(
+          ruleType,
+          'EVALUATION_SUPERSEDED',
+          { pruned: true },
+          t0,
+        );
+      }
       const prior = await client.zcount(key, minScore, now);
+      if (signal.aborted) {
+        return this.supersededRedisRuleResult(
+          ruleType,
+          'EVALUATION_SUPERSEDED',
+          { priorCount: prior },
+          t0,
+        );
+      }
       const review = prior >= VELOCITY_THRESHOLD;
       await client.zadd(key, now, member);
       const durationMs = Date.now() - t0;
@@ -190,6 +247,9 @@ export class FraudRuleEngineService {
     const t0 = Date.now();
     const ruleType = FraudRuleType.LARGE_TRANSACTION;
     const amt = this.parseAmount(ctx.amount);
+    if (amt === null) {
+      return this.invalidAmountResult(ruleType, ctx.amount, t0);
+    }
     // TODO: normalize to USD equivalent via treasury/FX when needed.
     if (amt > LARGE_AMOUNT_USD) {
       return {
@@ -244,6 +304,9 @@ export class FraudRuleEngineService {
       };
     }
     const amt = this.parseAmount(ctx.amount);
+    if (amt === null) {
+      return this.invalidAmountResult(ruleType, ctx.amount, t0);
+    }
     const existing = await this.knownDeviceRepo.findOneBy({
       userId: ctx.userId,
       deviceFingerprint: fp,
@@ -293,6 +356,9 @@ export class FraudRuleEngineService {
     const hour = ctx.transactionTimestamp.getUTCHours();
     const inWindow = UNUSUAL_HOUR_BUCKETS.includes(hour);
     const amt = this.parseAmount(ctx.amount);
+    if (amt === null) {
+      return this.invalidAmountResult(ruleType, ctx.amount, t0);
+    }
     if (!inWindow || amt <= UNUSUAL_HOUR_AMOUNT) {
       return {
         ruleType,
@@ -346,6 +412,7 @@ export class FraudRuleEngineService {
    */
   private async ruleRecipientVelocity(
     ctx: FraudEvaluationContext,
+    signal: AbortSignal,
   ): Promise<FraudRuleEvaluationResult> {
     const t0 = Date.now();
     const ruleType = FraudRuleType.RECIPIENT_VELOCITY;
@@ -360,12 +427,36 @@ export class FraudRuleEngineService {
           Date.now() - t0,
         );
       }
+      if (signal.aborted) {
+        return this.supersededRedisRuleResult(
+          ruleType,
+          'EVALUATION_SUPERSEDED',
+          {},
+          t0,
+        );
+      }
       const key = `fraud:recipient_velocity:z:${ctx.recipientAccountId}`;
       const now = Date.now();
       const minScore = now - RECIPIENT_WINDOW_MS;
       const member = `${ctx.senderAccountId}|${ctx.paymentReference}`;
       await client.zremrangebyscore(key, 0, minScore - 1);
+      if (signal.aborted) {
+        return this.supersededRedisRuleResult(
+          ruleType,
+          'EVALUATION_SUPERSEDED',
+          { pruned: true },
+          t0,
+        );
+      }
       const raw = await client.zrangebyscore(key, minScore, now);
+      if (signal.aborted) {
+        return this.supersededRedisRuleResult(
+          ruleType,
+          'EVALUATION_SUPERSEDED',
+          { scanned: true },
+          t0,
+        );
+      }
       const senders = new Set<string>();
       for (const m of raw) {
         const idx = m.indexOf('|');
@@ -374,6 +465,14 @@ export class FraudRuleEngineService {
         }
       }
       senders.add(ctx.senderAccountId);
+      if (signal.aborted) {
+        return this.supersededRedisRuleResult(
+          ruleType,
+          'EVALUATION_SUPERSEDED',
+          { distinctSenders: senders.size },
+          t0,
+        );
+      }
       await client.zadd(key, now, member);
       await client.expire(key, 7200);
       const durationMs = Date.now() - t0;
@@ -437,16 +536,14 @@ export class FraudRuleEngineService {
       return;
     }
     try {
-      await this.knownDeviceRepo.save(
-        this.knownDeviceRepo.create({
-          userId: ctx.userId,
-          deviceId: ctx.deviceId?.trim() || null,
-          deviceFingerprint: fp,
-          metadata: null,
-          firstSeenAt: now,
-          lastSeenAt: now,
-        }),
-      );
+      await this.knownDeviceRepo.save({
+        userId: ctx.userId,
+        deviceId: ctx.deviceId?.trim() || null,
+        deviceFingerprint: fp,
+        metadata: null,
+        firstSeenAt: now,
+        lastSeenAt: now,
+      });
     } catch (e) {
       if (
         e instanceof QueryFailedError &&
@@ -467,12 +564,13 @@ export class FraudRuleEngineService {
       hourBucket: hour,
     });
     if (!row) {
-      row = this.hourProfileRepo.create({
+      await this.hourProfileRepo.save({
         userId: ctx.userId,
         hourBucket: hour,
-        transactionCount: 0,
-        lastIncrementAt: null,
+        transactionCount: 1,
+        lastIncrementAt: now,
       });
+      return;
     }
     row.transactionCount += 1;
     row.lastIncrementAt = now;

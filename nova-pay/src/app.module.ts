@@ -10,6 +10,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { LedgerModule } from './modules/ledger/ledger.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { FraudModule } from './modules/fraud/fraud.module';
+import { FxModule } from './modules/fx/fx.module';
 import { PayrollModule } from './modules/payroll/payroll.module';
 import { UsersModule } from './modules/users/users.module';
 
@@ -44,6 +45,7 @@ const featureModules: Importable[] = [
   PaymentsModule,
   PayrollModule,
   FraudModule,
+  FxModule,
 ];
 
 @Module({

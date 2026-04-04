@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { OutboxModule } from '../../infrastructure/outbox/outbox.module';
 import { CreateAccountHandler } from './command/handlers/create-account.handler';
 import { AccountsController } from './controller/accounts.controller';
 import { Account } from './entities/account.entity';
@@ -13,7 +14,7 @@ import { AccountsService } from './service/accounts.service';
  * Other modules use exported {@link AccountsService} only (no repo imports).
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Account])],
+  imports: [TypeOrmModule.forFeature([Account]), OutboxModule],
   controllers: [AccountsController],
   providers: [
     AccountRepository,

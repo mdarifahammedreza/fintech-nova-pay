@@ -4,12 +4,18 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { EntityManager } from 'typeorm';
-import { Account } from '../entities/account.entity';
-import { AccountStatus } from '../enums/account-status.enum';
-import { Currency } from '../enums/currency.enum';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource, EntityManager } from 'typeorm';
+import { OutboxRepository } from '../../../infrastructure/outbox/outbox.repository';
+import { OutboxRoutingKey } from '../../../infrastructure/outbox/outbox-routing-key.enum';
 import { CreateAccountDto } from '../dto/create-account.dto';
 import { UpdateAccountStatusDto } from '../dto/update-account-status.dto';
+import { Account } from '../entities/account.entity';
+import { AccountCreatedEvent } from '../events/account-created.event';
+import { AccountFrozenEvent } from '../events/account-frozen.event';
+import { AccountUnfrozenEvent } from '../events/account-unfrozen.event';
+import { AccountStatus } from '../enums/account-status.enum';
+import { Currency } from '../enums/currency.enum';
 import { AccountRepository } from '../repositories/account.repository';
 
 const PROJECTION_SCALE = 10_000n;
@@ -31,20 +37,48 @@ export type LedgerPostedProjectionLine = {
  */
 @Injectable()
 export class AccountsService {
-  constructor(private readonly accounts: AccountRepository) {}
+  constructor(
+    private readonly accounts: AccountRepository,
+    private readonly outbox: OutboxRepository,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
+  ) {}
 
   async createAccount(dto: CreateAccountDto): Promise<Account> {
-    if (await this.accounts.existsBy({ accountNumber: dto.accountNumber })) {
-      throw new ConflictException('Account number already in use');
-    }
-    return this.accounts.save({
-      userId: dto.userId,
-      accountNumber: dto.accountNumber,
-      currency: dto.currency,
-      status: dto.status ?? AccountStatus.PENDING,
-      balance: '0',
-      availableBalance: '0',
-      overdraftLimit: dto.overdraftLimit ?? '0',
+    return this.dataSource.transaction(async (manager) => {
+      const taken = await manager.exists(Account, {
+        where: { accountNumber: dto.accountNumber },
+      });
+      if (taken) {
+        throw new ConflictException('Account number already in use');
+      }
+      const status = dto.status ?? AccountStatus.PENDING;
+      const row = manager.create(Account, {
+        userId: dto.userId,
+        accountNumber: dto.accountNumber,
+        currency: dto.currency,
+        status,
+        balance: '0',
+        availableBalance: '0',
+        overdraftLimit: dto.overdraftLimit ?? '0',
+      });
+      const saved = await manager.save(Account, row);
+      const occurredAt = new Date();
+      const evt = new AccountCreatedEvent(
+        saved.id,
+        saved.userId,
+        saved.accountNumber,
+        saved.currency,
+        saved.status,
+        occurredAt.toISOString(),
+      );
+      await this.outbox.enqueueInTransaction(manager, {
+        routingKey: OutboxRoutingKey.ACCOUNT_CREATED,
+        correlationId: null,
+        occurredAt,
+        payload: evt.toJSON(),
+      });
+      return saved;
     });
   }
 
@@ -69,9 +103,53 @@ export class AccountsService {
     id: string,
     dto: UpdateAccountStatusDto,
   ): Promise<Account> {
-    const account = await this.requireAccountById(id);
-    account.status = dto.status;
-    return this.accounts.save(account);
+    return this.dataSource.transaction(async (manager) => {
+      const account = await manager.findOne(Account, { where: { id } });
+      if (!account) {
+        throw new NotFoundException('Account not found');
+      }
+      const previous = account.status;
+      account.status = dto.status;
+      const saved = await manager.save(Account, account);
+      const occurredAt = new Date();
+      const iso = occurredAt.toISOString();
+
+      if (
+        dto.status === AccountStatus.FROZEN &&
+        previous !== AccountStatus.FROZEN
+      ) {
+        const evt = new AccountFrozenEvent(
+          saved.id,
+          saved.userId,
+          saved.accountNumber,
+          iso,
+        );
+        await this.outbox.enqueueInTransaction(manager, {
+          routingKey: OutboxRoutingKey.ACCOUNT_FROZEN,
+          correlationId: null,
+          occurredAt,
+          payload: evt.toJSON(),
+        });
+      } else if (
+        previous === AccountStatus.FROZEN &&
+        dto.status === AccountStatus.ACTIVE
+      ) {
+        const evt = new AccountUnfrozenEvent(
+          saved.id,
+          saved.userId,
+          saved.accountNumber,
+          iso,
+        );
+        await this.outbox.enqueueInTransaction(manager, {
+          routingKey: OutboxRoutingKey.ACCOUNT_UNFROZEN,
+          correlationId: null,
+          occurredAt,
+          payload: evt.toJSON(),
+        });
+      }
+
+      return saved;
+    });
   }
 
   /**

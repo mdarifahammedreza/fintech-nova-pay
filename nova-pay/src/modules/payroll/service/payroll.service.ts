@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
+import { OutboxRepository } from '../../../infrastructure/outbox/outbox.repository';
+import { OutboxRoutingKey } from '../../../infrastructure/outbox/outbox-routing-key.enum';
 import { CreatePayrollBatchDto } from '../dto/create-payroll-batch.dto';
 import { QueryPayrollBatchDto } from '../dto/query-payroll-batch.dto';
 import { PayrollBatch } from '../entities/payroll-batch.entity';
@@ -11,6 +13,7 @@ import { PayrollItemStatus } from '../enums/payroll-item-status.enum';
 import { PayrollBatchRepository } from '../repositories/payroll-batch.repository';
 import { PayrollFundingReservationRepository } from '../repositories/payroll-funding-reservation.repository';
 import { PayrollItemRepository } from '../repositories/payroll-item.repository';
+import { PayrollBatchCreatedEvent } from '../events/payroll-batch-created.event';
 
 /**
  * Payroll persistence and aggregate loading — no cross-module money calls.
@@ -21,6 +24,7 @@ export class PayrollService {
     private readonly batchRepo: PayrollBatchRepository,
     private readonly itemRepo: PayrollItemRepository,
     private readonly fundingRepo: PayrollFundingReservationRepository,
+    private readonly outbox: OutboxRepository,
     @InjectDataSource()
     private readonly dataSource: DataSource,
   ) {}
@@ -93,6 +97,25 @@ export class PayrollService {
         }),
       );
       const items = await manager.save(PayrollItem, itemRows);
+      const occurredAt = new Date();
+      const evt = new PayrollBatchCreatedEvent(
+        batch.id,
+        batch.employerAccountId,
+        batch.reference,
+        batch.idempotencyKey,
+        batch.correlationId,
+        batch.externalBatchRef,
+        batch.totalAmount,
+        batch.currency,
+        items.length,
+        occurredAt.toISOString(),
+      );
+      await this.outbox.enqueueInTransaction(manager, {
+        routingKey: OutboxRoutingKey.PAYROLL_BATCH_CREATED,
+        correlationId: batch.correlationId,
+        occurredAt,
+        payload: evt.toJSON(),
+      });
       return { batch, items };
     });
   }

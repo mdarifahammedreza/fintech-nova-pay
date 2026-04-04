@@ -195,12 +195,15 @@ These steps must happen in **one** PostgreSQL transaction where applicable.
 - Events are written to **outbox** inside the same DB transaction as the
   business write.
 - RabbitMQ publishing happens **only** from outbox processing **after** commit.
-- Initial payment events: `payment.created`, `payment.completed`,
-  `payment.failed`
-- Initial ledger events:
-
-  - `ledger.transaction.posted`
-  - `ledger.transaction.reversed`
+- Canonical routing keys live in `OutboxRoutingKey` (no duplicate literals).
+- Payment: `payment.created`, `payment.completed`, `payment.failed`
+- Ledger: `ledger.transaction.posted`, `ledger.transaction.reversed`
+- Fraud (non-APPROVED outcomes): `fraud.risk.blocked`,
+  `fraud.risk.action_required`, `fraud.risk.review_triggered`
+- Accounts: `account.created`, `account.frozen`, `account.unfrozen`
+- Payroll: `payroll.batch.created` (same TX as batch + line insert)
+- FX: `fx.rate.locked`, `fx.trade.executed`,
+  `fx.international_transfer.created`
 
 ## Coding
 

@@ -1,98 +1,100 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# NovaPay
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Modular NestJS fintech monolith: PostgreSQL as source of truth, ledger-first money movement, synchronous fraud checks, FX rate locks and international transfer orchestration, and **transactional outbox** integration with RabbitMQ (publish only after DB commit).
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+**Repository:** [github.com/mdarifahammedreza/fintech-nova-pay](https://github.com/mdarifahammedreza/fintech-nova-pay)
 
-## Description
+## Tech stack
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+- **Runtime:** Node.js, NestJS 11, TypeScript  
+- **Database:** PostgreSQL, TypeORM, migrations  
+- **Messaging:** RabbitMQ (domain events via outbox relay; publisher confirms)  
+- **Cache:** Redis (fraud rules / optional infrastructure)  
+- **API docs:** Swagger (`/api` when not in production)
 
-## Project setup
+## Implemented features by domain
+
+### Users & authentication
+
+- User management module; JWT-based auth module for identity and authorization.
+
+### Accounts
+
+- Account lifecycle (create, read, status updates) with balance projections maintained by ledger postings.
+- **Outbox events** (same PostgreSQL transaction as the write):
+  - `account.created`
+  - `account.frozen` (transition into `FROZEN`)
+  - `account.unfrozen` (`FROZEN` → `ACTIVE`)
+
+### Ledger
+
+- Double-entry postings: one `LedgerTransaction` and multiple `LedgerEntry` rows per post.
+- Balance / available balance projections updated in the **same** transaction as ledger lines.
+- Reversals as explicit `REVERSAL` transaction type.
+- **Outbox:** `ledger.transaction.posted`, `ledger.transaction.reversed` (enqueued inside the posting transaction).
+
+### Payments
+
+- Idempotent payment submission (`Idempotency-Key` + stored idempotency records).
+- Orchestrated flow: locked accounts → processing → ledger post → terminal status in **one** DB transaction.
+- **Outbox:** `payment.created`, `payment.completed`, `payment.failed` in that money-path transaction.
+
+### Fraud
+
+- Synchronous risk evaluation before money release (fail-closed on engine / infrastructure errors).
+- Persisted `RiskDecision` and per-rule `FraudSignal` rows in a single transaction.
+- **Outbox** for non-approved outcomes (same transaction as persistence):
+  - `fraud.risk.blocked`
+  - `fraud.risk.action_required`
+  - `fraud.risk.review_triggered`
+- HTTP API for evaluation and risk-decision reads; Redis-backed rule execution where configured.
+- Domain event classes (`FraudBlockedEvent`, etc.) used as outbox payload envelopes.
+
+### FX (foreign exchange)
+
+- **Rate lock:** live quote from provider (mock mode via env), persisted `FxRateLock` with TTL; **outbox** `fx.rate.locked` in the same transaction as insert.
+- **International transfer:** consumes lock under row lock, creates `FxTrade`, emits **outbox** `fx.trade.executed` and `fx.international_transfer.created` in the same transaction (ledger/payment hooks documented as future `PostingService` / payment orchestration integration).
+- CQRS-style commands/queries and thin `FxController`:
+  - `POST /fx/lock-rate`
+  - `GET /fx/lock/:id`
+  - `POST /transfers/international` (requires `X-User-Id`, `Idempotency-Key` matching body)
+- Domain event classes for future/async flows: `FxRateLockedEvent`, `FxRateLockExpiredEvent`, `FxTradeExecutedEvent`, `InternationalTransferCreatedEvent`.
+
+### Payroll
+
+- Batch and item entities, validation, orchestration scaffolding.
+- **Outbox:** `payroll.batch.created` written in the **same** transaction as batch + line inserts when a new batch is persisted.
+- Processing / funding paths remain TODO (stubs throw until implemented).
+
+### Infrastructure: outbox & events
+
+- **`outbox_events` table:** append-oriented; rows move `PENDING` → `CLAIMED` → `PUBLISHED` (or `FAILED`); not deleted after publish (audit-friendly).
+- **Relay:** `OutboxRelayCronService` drains pending rows, publishes with **confirm channel**, then marks published; `SKIP LOCKED` + stale-claim reclaim for **multi-worker** safety.
+- **Canonical routing keys:** `OutboxRoutingKey` enum — avoid raw string routing keys in application code.
+- **No** direct RabbitMQ publish from HTTP handlers or domain services; only the outbox processor publishes after commit.
+
+Architecture rules and module boundaries are summarized in [`.cursor/rules/nova-architecture.md`](.cursor/rules/nova-architecture.md).
+
+## Configuration (high level)
+
+- `DATABASE_*` / TypeORM connection for PostgreSQL  
+- `RABBITMQ_URL` for relay and messaging (omit or set `OUTBOX_RELAY_MODULE_DISABLED=true` / `OUTBOX_RELAY_ENABLED=false` for local/CI without a broker)  
+- `FX_PROVIDER_MOCK=true` for deterministic FX quotes in non-production setups  
+- Redis URL where fraud or cache features expect it  
+
+Use `.env` / `.env.local` as loaded in `AppModule`.
+
+## Scripts
 
 ```bash
-$ yarn install
+npm install
+npm run build
+npm run start:dev
+npm run test
 ```
 
-## Compile and run the project
-
-```bash
-# development
-$ yarn run start
-
-# watch mode
-$ yarn run start:dev
-
-# production mode
-$ yarn run start:prod
-```
-
-## Run tests
-
-```bash
-# unit tests
-$ yarn run test
-
-# e2e tests
-$ yarn run test:e2e
-
-# test coverage
-$ yarn run test:cov
-```
-
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ yarn install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+Swagger UI: `http://localhost:3000/api` (non-production).
 
 ## License
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+See `package.json` (`UNLICENSED` unless you change it).

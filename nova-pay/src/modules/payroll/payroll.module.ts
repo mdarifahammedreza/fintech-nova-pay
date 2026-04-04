@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { OutboxModule } from '../../infrastructure/outbox/outbox.module';
 import { AccountsModule } from '../accounts/accounts.module';
 import { LedgerModule } from '../ledger/ledger.module';
 import { PaymentsModule } from '../payments/payments.module';
@@ -28,6 +29,7 @@ import { PayrollValidationService } from './service/payroll-validation.service';
       PayrollItem,
       PayrollFundingReservation,
     ]),
+    OutboxModule,
     AccountsModule,
     LedgerModule,
     PaymentsModule,

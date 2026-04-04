@@ -49,8 +49,6 @@ export class PayrollOrchestratorService {
 
     await this.validation.assertCreateBatchValid(dto);
     const { batch, items } = await this.payroll.persistNewBatchWithItems(dto);
-    // TODO: emit payroll.batch.created via outbox in the same PostgreSQL
-    // transaction as persist once OutboxRepository is composed here.
     return { batch, items, created: true };
   }
 

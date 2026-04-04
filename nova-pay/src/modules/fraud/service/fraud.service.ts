@@ -1,12 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import { RiskDecision } from '../entities/risk-decision.entity';
 import { FraudDecisionState } from '../enums/fraud-decision-state.enum';
 import { FraudRuleResult } from '../enums/fraud-rule-result.enum';
 import { FraudRuleType } from '../enums/fraud-rule-type.enum';
 import { FraudEvaluationContext } from '../interfaces/fraud-evaluation-context.interface';
 import { FraudRuleEvaluationResult } from '../interfaces/fraud-rule-evaluation-result.interface';
+import { RiskDecisionRepository } from '../repositories/risk-decision.repository';
 import {
   FraudAggregateSnapshot,
   FraudRuleLogService,
@@ -36,8 +35,7 @@ export class FraudService {
   constructor(
     private readonly engine: FraudRuleEngineService,
     private readonly ruleLog: FraudRuleLogService,
-    @InjectRepository(RiskDecision)
-    private readonly riskDecisionRepo: Repository<RiskDecision>,
+    private readonly riskDecisionRepo: RiskDecisionRepository,
   ) {}
 
   /**
@@ -47,34 +45,21 @@ export class FraudService {
     paymentReference: string,
     correlationId?: string,
   ): Promise<RiskDecision | null> {
-    const where: {
-      paymentReference: string;
-      correlationId?: string;
-    } = { paymentReference };
-    if (correlationId !== undefined && correlationId !== '') {
-      where.correlationId = correlationId;
-    }
-    return this.riskDecisionRepo.findOne({
-      where,
-      order: { createdAt: 'DESC' },
-    });
+    return this.riskDecisionRepo.findLatestByPaymentReference(
+      paymentReference,
+      correlationId,
+    );
   }
 
   async evaluateSynchronously(
     ctx: FraudEvaluationContext,
   ): Promise<RiskDecision> {
+    let ruleResults: FraudRuleEvaluationResult[];
+    let timedOut: boolean;
     try {
-      const { results: ruleResults, timedOut } =
-        await this.engine.evaluateAll(ctx);
-      const aggregate = this.aggregate(ruleResults, timedOut);
-      if (!timedOut) {
-        await this.engine.afterEvaluateSideEffects(ctx);
-      }
-      return await this.ruleLog.persistRiskDecisionAndSignals(
-        ctx,
-        ruleResults,
-        aggregate,
-      );
+      const out = await this.engine.evaluateAll(ctx);
+      ruleResults = out.results;
+      timedOut = out.timedOut;
     } catch (e) {
       this.logger.error(
         `Fraud evaluation failed (fail-closed): ${
@@ -91,6 +76,42 @@ export class FraudService {
         ...aggregate,
         engineMetadata,
       });
+    }
+
+    let aggregate = this.aggregate(ruleResults, timedOut);
+    if (!timedOut) {
+      try {
+        await this.engine.afterEvaluateSideEffects(ctx);
+      } catch (sideErr) {
+        this.logger.warn(
+          `Fraud post-evaluation side effects failed: ${
+            sideErr instanceof Error ? sideErr.message : sideErr
+          }`,
+        );
+        aggregate = {
+          ...aggregate,
+          engineMetadata: {
+            ...(aggregate.engineMetadata ?? {}),
+            sideEffectsError:
+              sideErr instanceof Error ? sideErr.message : String(sideErr),
+          },
+        };
+      }
+    }
+
+    try {
+      return await this.ruleLog.persistRiskDecisionAndSignals(
+        ctx,
+        ruleResults,
+        aggregate,
+      );
+    } catch (persistErr) {
+      this.logger.error(
+        `Fraud persistence failed (not re-running catastrophic path): ${
+          persistErr instanceof Error ? persistErr.stack : persistErr
+        }`,
+      );
+      throw persistErr;
     }
   }
 
