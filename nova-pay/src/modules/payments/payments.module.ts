@@ -23,6 +23,7 @@ import { PaymentsService } from './service/payments.service';
     TypeOrmModule.forFeature([Payment, IdempotencyRecord]),
     AccountsModule,
     LedgerModule,
+    OutboxModule,
   ],
   controllers: [PaymentsController],
   providers: [

@@ -23,6 +23,7 @@ import { ReversalService } from './service/reversal.service';
   imports: [
     TypeOrmModule.forFeature([LedgerTransaction, LedgerEntry]),
     AccountsModule,
+    OutboxModule,
   ],
   controllers: [LedgerController],
   providers: [

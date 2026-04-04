@@ -44,7 +44,14 @@ import { IdempotencyRecordRepository } from '../repositories/idempotency-record.
  * and return the same payment row.
  *
  * TODO: **Fraud** — synchronous policy checks before ledger with locks held.
- * TODO: **Outbox** — enqueue `payment.*` / `ledger.*` before commit.
+ *
+ * Outbox: {@link OutboxRepository.enqueueInTransaction} for `payment.completed`
+ * or `payment.failed` in the same TX as terminal payment + idempotency state.
+ * Ledger events are written inside {@link PostingService.postWithSharedManager}.
+ *
+ * **Failure path:** after a ledger error, FAILED rows and `payment.failed` are
+ * saved and the callback **returns** the payment (no `throw`) so TypeORM
+ * commits; callers map `FAILED` to HTTP.
  */
 @Injectable()
 export class PaymentOrchestratorService {
@@ -53,6 +60,7 @@ export class PaymentOrchestratorService {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly idempotencyRepo: IdempotencyRecordRepository,
+    private readonly outbox: OutboxRepository,
   ) {}
 
   /**
@@ -108,13 +116,39 @@ export class PaymentOrchestratorService {
         payment.ledgerTransactionId = ledgerTx.id;
         idempotencyRecord.status = IdempotencyRecordStatus.COMPLETED;
         await manager.save(IdempotencyRecord, idempotencyRecord);
+        await this.outbox.enqueueInTransaction(manager, {
+          routingKey: OutboxRoutingKey.PAYMENT_COMPLETED,
+          correlationId: payment.correlationId ?? dto.correlationId ?? null,
+          occurredAt: new Date(),
+          payload: {
+            paymentId: payment.id,
+            reference: payment.reference,
+            ledgerTransactionId: ledgerTx.id,
+            amount: payment.amount,
+            currency: payment.currency,
+            type: payment.type,
+          },
+        });
         return manager.save(Payment, payment);
       } catch (err: unknown) {
         payment.status = PaymentStatus.FAILED;
         idempotencyRecord.status = IdempotencyRecordStatus.FAILED;
         await manager.save(IdempotencyRecord, idempotencyRecord);
-        await manager.save(Payment, payment);
-        throw err;
+        await this.outbox.enqueueInTransaction(manager, {
+          routingKey: OutboxRoutingKey.PAYMENT_FAILED,
+          correlationId: payment.correlationId ?? dto.correlationId ?? null,
+          occurredAt: new Date(),
+          payload: {
+            paymentId: payment.id,
+            reference: payment.reference,
+            amount: payment.amount,
+            currency: payment.currency,
+            type: payment.type,
+            reason:
+              err instanceof Error ? err.message : String(err),
+          },
+        });
+        return manager.save(Payment, payment);
       }
     });
   }

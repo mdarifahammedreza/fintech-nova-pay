@@ -150,8 +150,21 @@ export class PostingService {
       projectionLines,
     );
 
-    // TODO: `OutboxRepository.enqueueInTransaction(manager, …)` for
-    // `ledger.transaction.posted` before this transaction commits.
+    const ledgerRoutingKey =
+      dto.type === LedgerTransactionType.REVERSAL
+        ? OutboxRoutingKey.LEDGER_TRANSACTION_REVERSED
+        : OutboxRoutingKey.LEDGER_TRANSACTION_POSTED;
+    await this.outbox.enqueueInTransaction(manager, {
+      routingKey: ledgerRoutingKey,
+      correlationId,
+      occurredAt: new Date(),
+      payload: {
+        ledgerTransactionId: tx.id,
+        correlationId,
+        type: dto.type,
+        reversesTransactionId: dto.reversesTransactionId ?? null,
+      },
+    });
 
     const result = await loadTxWithEntries(manager, tx.id);
     if (!result) {

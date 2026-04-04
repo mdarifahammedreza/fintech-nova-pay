@@ -20,8 +20,9 @@ import { PostingService } from './posting.service';
  * {@link PostingService} so history is never updated in place.
  *
  * **Transaction boundary:** the reversal attempt should run in one TX with
- * `PostingService.post` (see its phase list: ledger persist → projections →
- * `ledger.transaction.posted` outbox). Optionally lock the original transaction
+ * `PostingService.post` (ledger persist → projections →
+ * `ledger.transaction.reversed` outbox for `REVERSAL` type). Optionally lock
+ * the original transaction
  * row or use isolation so double-reversal is impossible.
  *
  * TODO: Pass through the same `EntityManager` as `PostingService.post` when
