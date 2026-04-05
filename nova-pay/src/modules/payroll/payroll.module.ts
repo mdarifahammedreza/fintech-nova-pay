@@ -12,6 +12,8 @@ import { PayrollBatch } from './entities/payroll-batch.entity';
 import { PayrollFundingReservation } from './entities/payroll-funding-reservation.entity';
 import { PayrollItem } from './entities/payroll-item.entity';
 import { GetPayrollBatchByIdHandler } from './query/handlers/get-payroll-batch-by-id.handler';
+import { GetPayrollJobCompletionReportHandler } from './query/handlers/get-payroll-job-completion-report.handler';
+import { GetPayrollJobStatusHandler } from './query/handlers/get-payroll-job-status.handler';
 import { PayrollBatchRepository } from './repositories/payroll-batch.repository';
 import { PayrollFundingReservationRepository } from './repositories/payroll-funding-reservation.repository';
 import { PayrollItemRepository } from './repositories/payroll-item.repository';
@@ -46,6 +48,8 @@ import { PayrollValidationService } from './service/payroll-validation.service';
     CreatePayrollBatchHandler,
     ProcessPayrollBatchHandler,
     GetPayrollBatchByIdHandler,
+    GetPayrollJobStatusHandler,
+    GetPayrollJobCompletionReportHandler,
     JwtAuthGuard,
   ],
   exports: [PayrollService, PayrollOrchestratorService],

@@ -19,6 +19,14 @@ import { PayrollBatchCreatedEvent } from '../events/payroll-batch-created.event'
 import { PayrollBatchFailedEvent } from '../events/payroll-batch-failed.event';
 import { PayrollBatchFundedEvent } from '../events/payroll-batch-funded.event';
 import { PayrollItemCompletedEvent } from '../events/payroll-item-completed.event';
+import {
+  PayrollJobCompletionReportResult,
+  PayrollJobCompletionReportView,
+  PayrollJobFailureLineView,
+  PayrollJobStatusView,
+} from '../interfaces/payroll-job-read.view';
+
+const AMOUNT_SCALE = 10_000n;
 
 /**
  * Payroll persistence and aggregate loading — no cross-module money calls.
@@ -144,6 +152,100 @@ export class PayrollService {
     return this.fundingRepo.findByBatchId(batchId);
   }
 
+  async getPayrollJobStatusView(
+    batchId: string,
+  ): Promise<PayrollJobStatusView | null> {
+    const batch = await this.getBatchById(batchId);
+    if (!batch) {
+      return null;
+    }
+    const items = await this.listItemsByBatchId(batchId);
+    const reservation = await this.getFundingReservationByBatchId(batchId);
+    const linesTotal = items.length;
+    const linesPending = items.filter(
+      (i) => i.status === PayrollItemStatus.PENDING,
+    ).length;
+    const linesCompleted = items.filter(
+      (i) => i.status === PayrollItemStatus.COMPLETED,
+    ).length;
+    const linesFailed = items.filter(
+      (i) => i.status === PayrollItemStatus.FAILED,
+    ).length;
+    const done = linesCompleted + linesFailed;
+    const disbursementProgressPercent =
+      linesTotal === 0
+        ? 0
+        : Math.min(100, Math.round((100 * done) / linesTotal));
+    const fundingPosted =
+      reservation?.reservationStatus === 'POSTED' &&
+      reservation.ledgerTransactionId != null;
+    return {
+      jobId: batch.id,
+      employerAccountId: batch.employerAccountId,
+      batchStatus: batch.status,
+      reference: batch.reference,
+      correlationId: batch.correlationId,
+      totalAmount: batch.totalAmount,
+      currency: batch.currency,
+      linesTotal,
+      linesPending,
+      linesCompleted,
+      linesFailed,
+      disbursementProgressPercent,
+      fundingPosted,
+      fundingReservationId: reservation?.id ?? null,
+      fundingLedgerTransactionId: reservation?.ledgerTransactionId ?? null,
+      createdAt: batch.createdAt,
+      updatedAt: batch.updatedAt,
+    };
+  }
+
+  async getPayrollJobCompletionReport(
+    batchId: string,
+  ): Promise<PayrollJobCompletionReportResult> {
+    const batch = await this.getBatchById(batchId);
+    if (!batch) {
+      return { kind: 'not_found' };
+    }
+    if (
+      batch.status !== PayrollBatchStatus.COMPLETED &&
+      batch.status !== PayrollBatchStatus.FAILED
+    ) {
+      return { kind: 'not_terminal', batchStatus: batch.status };
+    }
+    const items = await this.listItemsByBatchId(batchId);
+    const succeeded = items.filter(
+      (i) => i.status === PayrollItemStatus.COMPLETED,
+    );
+    const failed = items.filter((i) => i.status === PayrollItemStatus.FAILED);
+    const failures: PayrollJobFailureLineView[] = failed.map((i) => ({
+      itemId: i.id,
+      itemReference: i.itemReference,
+      employeeAccountId: i.employeeAccountId,
+      amount: i.amount,
+      currency: i.currency,
+      failureReason: i.memo,
+    }));
+    const report: PayrollJobCompletionReportView = {
+      jobId: batch.id,
+      batchStatus: batch.status,
+      reference: batch.reference,
+      correlationId: batch.correlationId,
+      totalAmountScheduled: batch.totalAmount,
+      currency: batch.currency,
+      lineCount: items.length,
+      successCount: succeeded.length,
+      failureCount: failed.length,
+      amountSucceeded: sumDecimalAmountStrings(
+        succeeded.map((i) => i.amount),
+      ),
+      amountFailed: sumDecimalAmountStrings(failed.map((i) => i.amount)),
+      failures,
+      completedAt: batch.updatedAt.toISOString(),
+    };
+    return { kind: 'ok', report };
+  }
+
   listItemsByBatchManaged(
     manager: EntityManager,
     batchId: string,
@@ -154,10 +256,6 @@ export class PayrollService {
     });
   }
 
-  /**
-   * Marks a line FAILED after a payout attempt error (separate TX so partial
-   * failure is visible even when the payout TX rolled back).
-   */
   /**
    * Terminal failure before disbursement (e.g. ledger rejected funding).
    * No-op if the batch is no longer DRAFT.
@@ -205,6 +303,10 @@ export class PayrollService {
     });
   }
 
+  /**
+   * Marks a line FAILED after a payout attempt error (separate TX so partial
+   * failure is visible even when the payout TX rolled back).
+   */
   async markItemPayoutFailed(itemId: string, err: unknown): Promise<void> {
     const message =
       err instanceof Error ? err.message : String(err);
@@ -413,4 +515,30 @@ function firstPayrollFailureSummary(items: PayrollItem[]): {
     reasonCode: 'PARTIAL_DISBURSEMENT',
     message: failed?.memo ?? 'One or more payroll lines failed',
   };
+}
+
+function sumDecimalAmountStrings(amounts: string[]): string {
+  let acc = 0n;
+  for (const a of amounts) {
+    acc += parseDecimalToScaledAmount(a);
+  }
+  return formatScaledAmount(acc);
+}
+
+function parseDecimalToScaledAmount(s: string): bigint {
+  const t = s.trim();
+  const m = /^(\d+)(?:\.(\d{0,4}))?$/.exec(t);
+  if (!m) {
+    return 0n;
+  }
+  const intPart = m[1];
+  const fracRaw = m[2] ?? '';
+  const frac = (fracRaw + '0000').slice(0, 4);
+  return BigInt(intPart) * AMOUNT_SCALE + BigInt(frac);
+}
+
+function formatScaledAmount(v: bigint): string {
+  const intPart = v / AMOUNT_SCALE;
+  const frac = v % AMOUNT_SCALE;
+  return `${intPart}.${frac.toString().padStart(4, '0')}`;
 }
