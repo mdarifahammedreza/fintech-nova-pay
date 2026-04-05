@@ -19,7 +19,6 @@ import {
   ApiOkResponse,
   ApiOperation,
   ApiParam,
-  ApiProperty,
   ApiQuery,
   ApiTags,
 } from '@nestjs/swagger';
@@ -29,80 +28,17 @@ import {
   JwtAuthGuard,
   type JwtRequestUser,
 } from '../../../infrastructure/auth/jwt-auth.guard';
-import { Currency } from '../../accounts/enums/currency.enum';
 import { CreatePaymentHandler } from '../command/handlers/create-payment.handler';
 import { CreatePaymentCommand } from '../command/impl/create-payment.command';
 import { CreatePaymentDto } from '../dto/create-payment.dto';
-import { Payment } from '../entities/payment.entity';
-import { PaymentStatus } from '../enums/payment-status.enum';
-import { PaymentType } from '../enums/payment-type.enum';
+import {
+  PaymentResponseDto,
+  toPaymentResponse,
+} from '../dto/payment-response.dto';
 import { GetPaymentByIdHandler } from '../query/handlers/get-payment-by-id.handler';
 import { GetPaymentByReferenceHandler } from '../query/handlers/get-payment-by-reference.handler';
 import { GetPaymentByIdQuery } from '../query/impl/get-payment-by-id.query';
 import { GetPaymentByReferenceQuery } from '../query/impl/get-payment-by-reference.query';
-
-export class PaymentResponseDto {
-  @ApiProperty({ format: 'uuid' })
-  id: string;
-
-  @ApiProperty({ enum: PaymentType })
-  type: PaymentType;
-
-  @ApiProperty({ enum: PaymentStatus })
-  status: PaymentStatus;
-
-  @ApiProperty()
-  reference: string;
-
-  @ApiProperty({ format: 'uuid' })
-  idempotencyRecordId: string;
-
-  @ApiProperty({ format: 'uuid' })
-  sourceAccountId: string;
-
-  @ApiProperty({ format: 'uuid' })
-  destinationAccountId: string;
-
-  @ApiProperty()
-  amount: string;
-
-  @ApiProperty({ enum: Currency })
-  currency: Currency;
-
-  @ApiProperty({ format: 'uuid', nullable: true })
-  ledgerTransactionId: string | null;
-
-  @ApiProperty({ nullable: true })
-  correlationId: string | null;
-
-  @ApiProperty({ nullable: true })
-  memo: string | null;
-
-  @ApiProperty()
-  createdAt: Date;
-
-  @ApiProperty()
-  updatedAt: Date;
-}
-
-function toPaymentResponse(p: Payment): PaymentResponseDto {
-  return {
-    id: p.id,
-    type: p.type,
-    status: p.status,
-    reference: p.reference,
-    idempotencyRecordId: p.idempotencyRecordId,
-    sourceAccountId: p.sourceAccountId,
-    destinationAccountId: p.destinationAccountId,
-    amount: p.amount,
-    currency: p.currency,
-    ledgerTransactionId: p.ledgerTransactionId,
-    correlationId: p.correlationId,
-    memo: p.memo,
-    createdAt: p.createdAt,
-    updatedAt: p.updatedAt,
-  };
-}
 
 type AuthedRequest = Request & { user: JwtRequestUser };
 
@@ -172,7 +108,12 @@ export class PaymentsController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get payment by id' })
+  @ApiOperation({
+    summary: 'Get payment by id',
+    description:
+      'Includes `ledgerTransactionId` and `paymentLedgerCorrelationId` for ' +
+      'joining to `GET /ledger/transactions/{ledgerTransactionId}` (see docs/transactions-api-mapping.md).',
+  })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: PaymentResponseDto })
   async getById(

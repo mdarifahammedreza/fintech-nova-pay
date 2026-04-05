@@ -24,4 +24,8 @@ export enum OutboxRoutingKey {
   FX_RATE_LOCK_EXPIRED = 'fx.rate.lock.expired',
   FX_TRADE_EXECUTED = 'fx.trade.executed',
   FX_INTERNATIONAL_TRANSFER_CREATED = 'fx.international_transfer.created',
+  LOAN_APPLIED = 'loan.applied',
+  LOAN_DISBURSED = 'loan.disbursed',
+  LOAN_REPAYMENT_RECEIVED = 'loan.repayment.received',
+  LOAN_OVERDUE = 'loan.overdue',
 }

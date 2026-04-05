@@ -1,4 +1,4 @@
-import { Inject, Injectable, forwardRef } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { AccountLedgerStatementLineView } from '../../../ledger/interfaces/account-ledger-statement-line.view';
 import { LedgerService } from '../../../ledger/service/ledger.service';
 import { AccountsService } from '../../service/accounts.service';
@@ -16,7 +16,6 @@ export type AccountStatementResult = {
 export class GetAccountStatementHandler {
   constructor(
     private readonly accounts: AccountsService,
-    @Inject(forwardRef(() => LedgerService))
     private readonly ledger: LedgerService,
   ) {}
 

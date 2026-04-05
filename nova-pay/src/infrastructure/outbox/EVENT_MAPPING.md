@@ -42,6 +42,7 @@ Examples:
 - `payroll.batch.created`
 - `fx.rate.locked` / `fx.rate.lock.expired` / `fx.trade.executed` /
   `fx.international_transfer.created`
+- `loan.applied` / `loan.disbursed` / `loan.repayment.received` / `loan.overdue`
 
 ## Consumer checklist
 

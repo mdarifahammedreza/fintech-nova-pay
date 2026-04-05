@@ -24,6 +24,7 @@ import { PostLedgerTransactionDto } from '../../ledger/dto/post-ledger-transacti
 import { LedgerEntryType } from '../../ledger/enums/ledger-entry-type.enum';
 import { LedgerTransactionType } from '../../ledger/enums/ledger-transaction-type.enum';
 import { PostingService } from '../../ledger/service/posting.service';
+import { paymentLedgerCorrelationId } from '../constants/payment-ledger-link.constants';
 import { CreatePaymentDto } from '../dto/create-payment.dto';
 import {
   IdempotencyRecord,
@@ -86,114 +87,139 @@ export class PaymentOrchestratorService {
   /**
    * Executes an internal money movement: fraud gate (with account locks held),
    * then ledger post only when fraud is `APPROVED`.
-   * `actorUserId` is JWT `sub`; the payment’s `sourceAccountId` must belong to
-   * that user before any terminal replay or money path (idempotency preserved).
+   * `actorUserId` is JWT `sub`. For most types the **source** account must belong
+   * to the actor; for {@link PaymentType.COLLECTION} the **destination** must.
    */
   async submitPayment(
+    dto: CreatePaymentDto,
+    actorUserId: string,
+  ): Promise<Payment> {
+    return this.dataSource.transaction((manager: EntityManager) =>
+      this.submitPaymentWithSharedManager(manager, dto, actorUserId),
+    );
+  }
+
+  /**
+   * Payment + ledger + payment outbox on the caller’s `EntityManager` so an
+   * outer domain transaction (e.g. loans) can commit loan rows and loan outbox
+   * together with the same money path.
+   */
+  async submitPaymentWithSharedManager(
+    manager: EntityManager,
     dto: CreatePaymentDto,
     actorUserId: string,
   ): Promise<Payment> {
     const scopeKey = dto.idempotencyScopeKey ?? '';
     const fingerprint = fingerprintCreatePayment(dto);
 
-    return this.dataSource.transaction(async (manager: EntityManager) => {
-      const { idempotencyRecord, payment } =
-        await this.resolveIdempotencySlot(
-          manager,
-          dto,
-          scopeKey,
-          fingerprint,
-        );
+    const { idempotencyRecord, payment } =
+      await this.resolveIdempotencySlot(
+        manager,
+        dto,
+        scopeKey,
+        fingerprint,
+      );
 
+    if (dto.type === PaymentType.COLLECTION) {
+      await this.assertPaymentDestinationOwnedByActor(
+        manager,
+        payment.destinationAccountId,
+        actorUserId,
+      );
+    } else {
       await this.assertPaymentSourceOwnedByActor(
         manager,
         payment.sourceAccountId,
         actorUserId,
       );
+    }
 
-      if (payment.status === PaymentStatus.COMPLETED) {
-        return payment;
-      }
-      if (payment.status === PaymentStatus.FAILED) {
-        return payment;
-      }
+    if (payment.status === PaymentStatus.COMPLETED) {
+      return payment;
+    }
+    if (payment.status === PaymentStatus.FAILED) {
+      return payment;
+    }
 
-      const { source, dest } = await this.loadPaymentAccountsLocked(
+    const { source, dest } = await this.loadPaymentAccountsLocked(
+      manager,
+      dto,
+    );
+    if (dto.type === PaymentType.COLLECTION) {
+      if (dest.userId !== actorUserId) {
+        throw new ForbiddenException(
+          'Destination account does not belong to caller',
+        );
+      }
+    } else if (source.userId !== actorUserId) {
+      throw new ForbiddenException(
+        'Source account does not belong to caller',
+      );
+    }
+    this.assertAccountsReady(source, dest, dto);
+
+    const riskDecision = await this.fraud.evaluateSynchronously(
+      this.buildFraudEvaluationContext(dto, payment, source, dest),
+    );
+    if (!this.isFraudApprovedForPayment(riskDecision.finalDecision)) {
+      await this.persistTerminalPaymentFailedForFraudDecision(
         manager,
         dto,
+        payment,
+        idempotencyRecord,
+        riskDecision,
       );
-      if (source.userId !== actorUserId) {
-        throw new ForbiddenException(
-          'Source account does not belong to caller',
-        );
-      }
-      this.assertAccountsReady(source, dest, dto);
+      return manager.save(Payment, payment);
+    }
 
-      // After idempotency + `FOR UPDATE` accounts + readiness: sync fraud; only
-      // APPROVED reaches PROCESSING and ledger (non-APPROVED → FAILED + outbox).
-      const riskDecision = await this.fraud.evaluateSynchronously(
-        this.buildFraudEvaluationContext(dto, payment, source, dest),
+    payment.status = PaymentStatus.PROCESSING;
+    await manager.save(Payment, payment);
+
+    const ledgerDto = this.buildLedgerPostDto(dto, payment.id);
+
+    try {
+      const ledgerTx = await this.posting.postWithSharedManager(
+        manager,
+        ledgerDto,
       );
-      if (!this.isFraudApprovedForPayment(riskDecision.finalDecision)) {
-        await this.persistTerminalPaymentFailedForFraudDecision(
-          manager,
-          dto,
-          payment,
-          idempotencyRecord,
-          riskDecision,
-        );
-        return manager.save(Payment, payment);
-      }
-
-      payment.status = PaymentStatus.PROCESSING;
-      await manager.save(Payment, payment);
-
-      const ledgerDto = this.buildLedgerPostDto(dto, payment.id);
-
-      try {
-        const ledgerTx = await this.posting.postWithSharedManager(
-          manager,
-          ledgerDto,
-        );
-        payment.status = PaymentStatus.COMPLETED;
-        payment.ledgerTransactionId = ledgerTx.id;
-        idempotencyRecord.status = IdempotencyRecordStatus.COMPLETED;
-        await manager.save(IdempotencyRecord, idempotencyRecord);
-        await this.outbox.enqueueInTransaction(manager, {
-          routingKey: OutboxRoutingKey.PAYMENT_COMPLETED,
-          correlationId: payment.correlationId ?? dto.correlationId ?? null,
-          occurredAt: new Date(),
-          payload: {
-            paymentId: payment.id,
-            reference: payment.reference,
-            ledgerTransactionId: ledgerTx.id,
-            amount: payment.amount,
-            currency: payment.currency,
-            type: payment.type,
-          },
-        });
-        return manager.save(Payment, payment);
-      } catch (err: unknown) {
-        payment.status = PaymentStatus.FAILED;
-        idempotencyRecord.status = IdempotencyRecordStatus.FAILED;
-        await manager.save(IdempotencyRecord, idempotencyRecord);
-        await this.outbox.enqueueInTransaction(manager, {
-          routingKey: OutboxRoutingKey.PAYMENT_FAILED,
-          correlationId: payment.correlationId ?? dto.correlationId ?? null,
-          occurredAt: new Date(),
-          payload: {
-            paymentId: payment.id,
-            reference: payment.reference,
-            amount: payment.amount,
-            currency: payment.currency,
-            type: payment.type,
-            reason:
-              err instanceof Error ? err.message : String(err),
-          },
-        });
-        return manager.save(Payment, payment);
-      }
-    });
+      payment.status = PaymentStatus.COMPLETED;
+      payment.ledgerTransactionId = ledgerTx.id;
+      idempotencyRecord.status = IdempotencyRecordStatus.COMPLETED;
+      await manager.save(IdempotencyRecord, idempotencyRecord);
+      await this.outbox.enqueueInTransaction(manager, {
+        routingKey: OutboxRoutingKey.PAYMENT_COMPLETED,
+        correlationId: payment.correlationId ?? dto.correlationId ?? null,
+        occurredAt: new Date(),
+        payload: {
+          paymentId: payment.id,
+          reference: payment.reference,
+          ledgerTransactionId: ledgerTx.id,
+          amount: payment.amount,
+          currency: payment.currency,
+          type: payment.type,
+        },
+      });
+      return manager.save(Payment, payment);
+    } catch (err: unknown) {
+      payment.status = PaymentStatus.FAILED;
+      idempotencyRecord.status = IdempotencyRecordStatus.FAILED;
+      await manager.save(IdempotencyRecord, idempotencyRecord);
+      await this.outbox.enqueueInTransaction(manager, {
+        routingKey: OutboxRoutingKey.PAYMENT_FAILED,
+        correlationId: payment.correlationId ?? dto.correlationId ?? null,
+        occurredAt: new Date(),
+        payload: {
+          paymentId: payment.id,
+          reference: payment.reference,
+          amount: payment.amount,
+          currency: payment.currency,
+          type: payment.type,
+          reason:
+            err instanceof Error ? err.message : String(err),
+        },
+      });
+      return manager.save(Payment, payment);
+    }
   }
 
   /**
@@ -333,6 +359,28 @@ export class PaymentOrchestratorService {
     if (row.userId !== actorUserId) {
       throw new ForbiddenException(
         'Source account does not belong to caller',
+      );
+    }
+  }
+
+  /**
+   * For {@link PaymentType.COLLECTION} (deposit): caller credits their own
+   * destination account; the debit leg may be a non-user funding account.
+   */
+  private async assertPaymentDestinationOwnedByActor(
+    manager: EntityManager,
+    destinationAccountId: string,
+    actorUserId: string,
+  ): Promise<void> {
+    const row = await manager.findOne(Account, {
+      where: { id: destinationAccountId },
+    });
+    if (!row) {
+      throw new NotFoundException('Destination account not found');
+    }
+    if (row.userId !== actorUserId) {
+      throw new ForbiddenException(
+        'Destination account does not belong to caller',
       );
     }
   }
@@ -482,10 +530,11 @@ export class PaymentOrchestratorService {
         currency: dto.currency,
       },
     ];
+    const payCorr = paymentLedgerCorrelationId(paymentId);
     return {
       type: ledgerTypeForPayment(dto.type),
-      correlationId: `payment:${paymentId}`,
-      memo: dto.memo ?? `payment:${paymentId}`,
+      correlationId: payCorr,
+      memo: dto.memo ?? payCorr,
       entries,
     };
   }
@@ -508,8 +557,10 @@ export class PaymentOrchestratorService {
       correlationRaw != null && correlationRaw.trim() !== ''
         ? correlationRaw.trim()
         : payment.id;
+    const principalUserId =
+      dto.type === PaymentType.COLLECTION ? dest.userId : source.userId;
     return {
-      userId: source.userId,
+      userId: principalUserId,
       sourceAccountId: source.id,
       destinationAccountId: dest.id,
       recipientAccountId: dest.id,

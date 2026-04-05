@@ -30,12 +30,10 @@ import {
   CreatePayrollBatchResponseDto,
   GetPayrollBatchResponseDto,
   PayrollBatchResponseDto,
-} from '../dto/payroll-batch-http.dto';
-import {
   toCreatePayrollBatchResponseDto,
   toGetPayrollBatchResponseDto,
   toPayrollBatchResponseDto,
-} from '../dto/payroll-batch.mapper';
+} from '../dto/payroll-batch-http.dto';
 import { CreatePayrollBatchDto } from '../dto/create-payroll-batch.dto';
 import {
   PayrollJobCompletionReportResponseDto,

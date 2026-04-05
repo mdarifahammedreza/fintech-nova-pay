@@ -8,6 +8,7 @@ import { FraudModule } from '../fraud/fraud.module';
 import { LedgerModule } from '../ledger/ledger.module';
 import { CreatePaymentHandler } from './command/handlers/create-payment.handler';
 import { PaymentsController } from './controller/payments.controller';
+import { TransactionsController } from './controller/transactions.controller';
 import { IdempotencyRecord } from './entities/idempotency-record.entity';
 import { Payment } from './entities/payment.entity';
 import { GetPaymentByIdHandler } from './query/handlers/get-payment-by-id.handler';
@@ -30,7 +31,7 @@ import { PaymentsService } from './service/payments.service';
     LedgerModule,
     OutboxModule,
   ],
-  controllers: [PaymentsController],
+  controllers: [PaymentsController, TransactionsController],
   providers: [
     PaymentRepository,
     IdempotencyRecordRepository,

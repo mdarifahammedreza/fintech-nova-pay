@@ -40,6 +40,6 @@ import { ReversalService } from './service/reversal.service';
     GetLedgerTransactionByIdHandler,
     JwtAuthGuard,
   ],
-  exports: [PostingService, LedgerService],
+  exports: [PostingService, LedgerService, ReverseLedgerTransactionHandler],
 })
 export class LedgerModule {}

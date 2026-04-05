@@ -16,109 +16,22 @@ import {
   ApiOkResponse,
   ApiOperation,
   ApiParam,
-  ApiProperty,
   ApiTags,
 } from '@nestjs/swagger';
 import { assertIdempotencyKeyMatchesBodyField } from '../../../common/utils/assert-idempotency-key-matches-body-field.util';
 import { JwtAuthGuard } from '../../../infrastructure/auth/jwt-auth.guard';
-import { Currency } from '../../accounts/enums/currency.enum';
 import { PostLedgerTransactionHandler } from '../command/handlers/post-ledger-transaction.handler';
 import { ReverseLedgerTransactionHandler } from '../command/handlers/reverse-ledger-transaction.handler';
 import { PostLedgerTransactionCommand } from '../command/impl/post-ledger-transaction.command';
 import { ReverseLedgerTransactionCommand } from '../command/impl/reverse-ledger-transaction.command';
 import { PostLedgerTransactionDto } from '../dto/post-ledger-transaction.dto';
 import { ReverseLedgerTransactionDto } from '../dto/reverse-ledger-transaction.dto';
-import { LedgerEntry } from '../entities/ledger-entry.entity';
-import { LedgerTransaction } from '../entities/ledger-transaction.entity';
-import { LedgerEntryType } from '../enums/ledger-entry-type.enum';
-import { LedgerTransactionStatus } from '../enums/ledger-transaction-status.enum';
-import { LedgerTransactionType } from '../enums/ledger-transaction-type.enum';
+import {
+  LedgerTransactionResponseDto,
+  toLedgerTransactionResponse,
+} from '../dto/ledger-transaction-response.dto';
 import { GetLedgerTransactionByIdHandler } from '../query/handlers/get-ledger-transaction-by-id.handler';
 import { GetLedgerTransactionByIdQuery } from '../query/impl/get-ledger-transaction-by-id.query';
-
-export class LedgerEntryResponseDto {
-  @ApiProperty({ format: 'uuid' })
-  id: string;
-
-  @ApiProperty({ format: 'uuid' })
-  ledgerTransactionId: string;
-
-  @ApiProperty({ format: 'uuid' })
-  accountId: string;
-
-  @ApiProperty({ enum: LedgerEntryType })
-  entryType: LedgerEntryType;
-
-  @ApiProperty()
-  amount: string;
-
-  @ApiProperty({ enum: Currency })
-  currency: Currency;
-
-  @ApiProperty()
-  lineNumber: number;
-
-  @ApiProperty({ nullable: true })
-  memo: string | null;
-
-  @ApiProperty()
-  createdAt: Date;
-}
-
-export class LedgerTransactionResponseDto {
-  @ApiProperty({ format: 'uuid' })
-  id: string;
-
-  @ApiProperty({ enum: LedgerTransactionType })
-  type: LedgerTransactionType;
-
-  @ApiProperty({ enum: LedgerTransactionStatus })
-  status: LedgerTransactionStatus;
-
-  @ApiProperty({ format: 'uuid', nullable: true })
-  reversesTransactionId: string | null;
-
-  @ApiProperty({ nullable: true })
-  correlationId: string | null;
-
-  @ApiProperty({ nullable: true })
-  memo: string | null;
-
-  @ApiProperty()
-  createdAt: Date;
-
-  @ApiProperty({ type: LedgerEntryResponseDto, isArray: true })
-  entries: LedgerEntryResponseDto[];
-}
-
-function toEntryResponse(e: LedgerEntry): LedgerEntryResponseDto {
-  return {
-    id: e.id,
-    ledgerTransactionId: e.ledgerTransactionId,
-    accountId: e.accountId,
-    entryType: e.entryType,
-    amount: e.amount,
-    currency: e.currency,
-    lineNumber: e.lineNumber,
-    memo: e.memo,
-    createdAt: e.createdAt,
-  };
-}
-
-function toTransactionResponse(
-  tx: LedgerTransaction,
-): LedgerTransactionResponseDto {
-  return {
-    id: tx.id,
-    type: tx.type,
-    status: tx.status,
-    reversesTransactionId: tx.reversesTransactionId,
-    correlationId: tx.correlationId,
-    memo: tx.memo,
-    createdAt: tx.createdAt,
-    entries: (tx.entries ?? []).map(toEntryResponse),
-  };
-}
 
 /**
  * Ledger HTTP surface — postings and reads only. Writes call
@@ -158,7 +71,7 @@ export class LedgerController {
     const tx = await this.postHandler.execute(
       new PostLedgerTransactionCommand(dto),
     );
-    return toTransactionResponse(tx);
+    return toLedgerTransactionResponse(tx);
   }
 
   @Post('reversals')
@@ -182,7 +95,7 @@ export class LedgerController {
     const tx = await this.reverseHandler.execute(
       new ReverseLedgerTransactionCommand(dto),
     );
-    return toTransactionResponse(tx);
+    return toLedgerTransactionResponse(tx);
   }
 
   @Get('transactions/:id')
@@ -198,6 +111,6 @@ export class LedgerController {
     if (!tx) {
       throw new NotFoundException('Ledger transaction not found');
     }
-    return toTransactionResponse(tx);
+    return toLedgerTransactionResponse(tx);
   }
 }
