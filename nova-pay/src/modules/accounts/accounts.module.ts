@@ -6,6 +6,7 @@ import { AuthModule } from '../auth/auth.module';
 import { CreateAccountHandler } from './command/handlers/create-account.handler';
 import { AccountsController } from './controller/accounts.controller';
 import { Account } from './entities/account.entity';
+import { GetAccountBalanceHandler } from './query/handlers/get-account-balance.handler';
 import { GetAccountByIdHandler } from './query/handlers/get-account-by-id.handler';
 import { GetUserAccountsHandler } from './query/handlers/get-user-accounts.handler';
 import { AccountRepository } from './repositories/account.repository';
@@ -23,6 +24,7 @@ import { AccountsService } from './service/accounts.service';
     AccountsService,
     CreateAccountHandler,
     GetAccountByIdHandler,
+    GetAccountBalanceHandler,
     GetUserAccountsHandler,
     JwtAuthGuard,
   ],

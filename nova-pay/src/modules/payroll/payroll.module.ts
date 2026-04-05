@@ -17,6 +17,7 @@ import { GetPayrollJobStatusHandler } from './query/handlers/get-payroll-job-sta
 import { PayrollBatchRepository } from './repositories/payroll-batch.repository';
 import { PayrollFundingReservationRepository } from './repositories/payroll-funding-reservation.repository';
 import { PayrollItemRepository } from './repositories/payroll-item.repository';
+import { PayrollEmployerFundingLockService } from './service/payroll-employer-funding-lock.service';
 import { PayrollOrchestratorService } from './service/payroll-orchestrator.service';
 import { PayrollService } from './service/payroll.service';
 import { PayrollValidationService } from './service/payroll-validation.service';
@@ -44,6 +45,7 @@ import { PayrollValidationService } from './service/payroll-validation.service';
     PayrollFundingReservationRepository,
     PayrollService,
     PayrollValidationService,
+    PayrollEmployerFundingLockService,
     PayrollOrchestratorService,
     CreatePayrollBatchHandler,
     ProcessPayrollBatchHandler,

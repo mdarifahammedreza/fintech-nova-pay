@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { JwtAuthGuard } from '../../infrastructure/auth/jwt-auth.guard';
 import { OutboxModule } from '../../infrastructure/outbox/outbox.module';
@@ -18,13 +18,13 @@ import { ReversalService } from './service/reversal.service';
 
 /**
  * Ledger bounded context — postings, reversals, and reads via services.
- * Cross-module consumers use {@link PostingService} only; reads and reversals
- * stay inside this module (HTTP handlers + internal services).
+ * Cross-module consumers use {@link PostingService} for writes and
+ * {@link LedgerService} for supported reads (e.g. account statements).
  */
 @Module({
   imports: [
     TypeOrmModule.forFeature([LedgerTransaction, LedgerEntry]),
-    AccountsModule,
+    forwardRef(() => AccountsModule),
     AuthModule,
     OutboxModule,
   ],
@@ -40,6 +40,6 @@ import { ReversalService } from './service/reversal.service';
     GetLedgerTransactionByIdHandler,
     JwtAuthGuard,
   ],
-  exports: [PostingService],
+  exports: [PostingService, LedgerService],
 })
 export class LedgerModule {}

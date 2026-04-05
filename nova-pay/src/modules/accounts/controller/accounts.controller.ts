@@ -27,12 +27,18 @@ import {
 } from '../../../infrastructure/auth/jwt-auth.guard';
 import { CreateAccountHandler } from '../command/handlers/create-account.handler';
 import { CreateAccountCommand } from '../command/impl/create-account.command';
+import {
+  AccountBalanceResponseDto,
+  toAccountBalanceResponseDto,
+} from '../dto/account-balance-response.dto';
 import { CreateAccountDto } from '../dto/create-account.dto';
 import { Account } from '../entities/account.entity';
 import { AccountStatus } from '../enums/account-status.enum';
 import { Currency } from '../enums/currency.enum';
+import { GetAccountBalanceHandler } from '../query/handlers/get-account-balance.handler';
 import { GetAccountByIdHandler } from '../query/handlers/get-account-by-id.handler';
 import { GetUserAccountsHandler } from '../query/handlers/get-user-accounts.handler';
+import { GetAccountBalanceQuery } from '../query/impl/get-account-balance.query';
 import { GetAccountByIdQuery } from '../query/impl/get-account-by-id.query';
 import { GetUserAccountsQuery } from '../query/impl/get-user-accounts.query';
 
@@ -98,6 +104,7 @@ export class AccountsController {
   constructor(
     private readonly createAccountHandler: CreateAccountHandler,
     private readonly getAccountByIdHandler: GetAccountByIdHandler,
+    private readonly getAccountBalanceHandler: GetAccountBalanceHandler,
     private readonly getUserAccountsHandler: GetUserAccountsHandler,
   ) {}
 
@@ -126,6 +133,28 @@ export class AccountsController {
       new GetUserAccountsQuery(userId, req.user.sub),
     );
     return rows.map(toAccountResponse);
+  }
+
+  @Get(':id/balance')
+  @ApiOperation({
+    summary: 'Get account balance projection',
+    description:
+      'Returns ledger-derived `balance` and `availableBalance` from the ' +
+      'account row. Caller must own the account (`userId` = JWT `sub`).',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Account id' })
+  @ApiOkResponse({ type: AccountBalanceResponseDto })
+  async getBalance(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: AuthedRequest,
+  ): Promise<AccountBalanceResponseDto> {
+    const view = await this.getAccountBalanceHandler.execute(
+      new GetAccountBalanceQuery(id, req.user.sub),
+    );
+    if (!view) {
+      throw new NotFoundException('Account not found');
+    }
+    return toAccountBalanceResponseDto(view);
   }
 
   @Get(':id')

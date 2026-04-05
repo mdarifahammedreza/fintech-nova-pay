@@ -37,6 +37,26 @@ export class LedgerEntryRepository extends BaseRepository<LedgerEntry> {
     });
   }
 
+  /**
+   * Paginated ledger lines for an account with transaction header (statement).
+   * Newest transactions first; lines within a transaction by line number.
+   */
+  findStatementPageByAccountId(
+    accountId: string,
+    skip: number,
+    take: number,
+  ): Promise<[LedgerEntry[], number]> {
+    return this.repository
+      .createQueryBuilder('e')
+      .innerJoinAndSelect('e.transaction', 't')
+      .where('e.accountId = :accountId', { accountId })
+      .orderBy('t.createdAt', 'DESC')
+      .addOrderBy('e.lineNumber', 'ASC')
+      .skip(skip)
+      .take(take)
+      .getManyAndCount();
+  }
+
   saveEntryLines(
     entities: DeepPartial<LedgerEntry>[],
   ): Promise<LedgerEntry[]> {

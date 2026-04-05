@@ -18,6 +18,7 @@ import { PayrollFundingReservation } from '../entities/payroll-funding-reservati
 import { PayrollItem } from '../entities/payroll-item.entity';
 import { PayrollBatchStatus } from '../enums/payroll-batch-status.enum';
 import { PayrollItemStatus } from '../enums/payroll-item-status.enum';
+import { PayrollEmployerFundingLockService } from './payroll-employer-funding-lock.service';
 import { PayrollService } from './payroll.service';
 import { PayrollValidationService } from './payroll-validation.service';
 
@@ -33,6 +34,9 @@ const LEDGER_MEMO_MAX = 512;
  * Coordinates validation, funding reservation, per-item execution, and
  * finalization. Uses {@link PostingService} for all money movement — never
  * sibling repositories or direct ledger tables.
+ *
+ * Employer debits for funding are serialized per employer account via
+ * {@link PayrollEmployerFundingLockService} inside the funding transaction.
  */
 @Injectable()
 export class PayrollOrchestratorService {
@@ -40,6 +44,7 @@ export class PayrollOrchestratorService {
     private readonly payroll: PayrollService,
     private readonly validation: PayrollValidationService,
     private readonly posting: PostingService,
+    private readonly employerFundingLock: PayrollEmployerFundingLockService,
     private readonly config: ConfigService,
     @InjectDataSource()
     private readonly dataSource: DataSource,
@@ -189,6 +194,11 @@ export class PayrollOrchestratorService {
         );
         return;
       }
+
+      await this.employerFundingLock.assertTransactionScopedEmployerLock(
+        manager,
+        lockedBatch.employerAccountId,
+      );
 
       const memo = (dto.memo ?? `Payroll fund ${lockedBatch.reference}`).slice(
         0,
