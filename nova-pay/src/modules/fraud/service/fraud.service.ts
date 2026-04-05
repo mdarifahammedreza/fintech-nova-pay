@@ -1,6 +1,16 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+import { OutboxRepository } from '../../../infrastructure/outbox/outbox.repository';
+import { OutboxRoutingKey } from '../../../infrastructure/outbox/outbox-routing-key.enum';
 import { RiskDecision } from '../entities/risk-decision.entity';
 import { FraudDecisionState } from '../enums/fraud-decision-state.enum';
+import { FraudFlagResolvedEvent } from '../events/fraud-flag-resolved.event';
 import { FraudRuleResult } from '../enums/fraud-rule-result.enum';
 import { FraudRuleType } from '../enums/fraud-rule-type.enum';
 import { FraudEvaluationContext } from '../interfaces/fraud-evaluation-context.interface';
@@ -36,6 +46,9 @@ export class FraudService {
     private readonly engine: FraudRuleEngineService,
     private readonly ruleLog: FraudRuleLogService,
     private readonly riskDecisionRepo: RiskDecisionRepository,
+    private readonly outbox: OutboxRepository,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -49,6 +62,63 @@ export class FraudService {
       paymentReference,
       correlationId,
     );
+  }
+
+  /**
+   * Clears a BLOCKED or REVIEW decision to APPROVED and enqueues
+   * `fraud.flag.resolved` in the same transaction as the UPDATE.
+   */
+  async resolveRiskDecision(
+    riskDecisionId: string,
+    resolutionNote?: string | null,
+  ): Promise<RiskDecision> {
+    return this.dataSource.transaction(async (manager) => {
+      const row = await manager.findOne(RiskDecision, {
+        where: { id: riskDecisionId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!row) {
+        throw new NotFoundException('Risk decision not found');
+      }
+      const previous = row.finalDecision;
+      if (
+        previous !== FraudDecisionState.BLOCKED &&
+        previous !== FraudDecisionState.REVIEW
+      ) {
+        throw new BadRequestException(
+          'Only BLOCKED or REVIEW decisions can be resolved to APPROVED',
+        );
+      }
+      row.finalDecision = FraudDecisionState.APPROVED;
+      row.engineMetadata = {
+        ...(row.engineMetadata ?? {}),
+        resolvedAt: new Date().toISOString(),
+        previousDecision: previous,
+      };
+      const saved = await manager.save(RiskDecision, row);
+      const occurredAt = new Date();
+      const occurredIso = occurredAt.toISOString();
+      const note =
+        resolutionNote != null && resolutionNote.trim() !== ''
+          ? resolutionNote.trim()
+          : null;
+      const evt = new FraudFlagResolvedEvent(
+        saved.id,
+        saved.userId,
+        saved.paymentReference,
+        saved.correlationId,
+        previous,
+        occurredIso,
+        note,
+      );
+      await this.outbox.enqueueInTransaction(manager, {
+        routingKey: OutboxRoutingKey.FRAUD_FLAG_RESOLVED,
+        correlationId: saved.correlationId,
+        occurredAt,
+        payload: evt.toJSON(),
+      });
+      return saved;
+    });
   }
 
   async evaluateSynchronously(

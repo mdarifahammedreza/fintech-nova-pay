@@ -82,6 +82,60 @@ export class PayrollValidationService {
         'All items must be PENDING before processing',
       );
     }
+    this.assertItemTotalsMatchBatchHeader(batch, items);
+  }
+
+  /**
+   * Re-checks persisted lines vs header before any money move (defense in depth).
+   */
+  assertItemTotalsMatchBatchHeader(
+    batch: PayrollBatch,
+    items: PayrollItem[],
+  ): void {
+    let sum = 0n;
+    for (const line of items) {
+      if (line.currency !== batch.currency) {
+        throw new BadRequestException(
+          'Item currency must match batch currency',
+        );
+      }
+      sum += scaleAmount(line.amount);
+    }
+    const total = scaleAmount(batch.totalAmount);
+    if (sum !== total) {
+      throw new BadRequestException(
+        'Sum of item amounts must equal batch totalAmount',
+      );
+    }
+  }
+
+  /**
+   * Resume rules when the batch is already disbursing (partial prior run).
+   */
+  assertDisbursingResume(
+    _batch: PayrollBatch,
+    reservation: { reservationStatus: string } | null,
+    items: PayrollItem[],
+  ): void {
+    if (!reservation || reservation.reservationStatus !== 'POSTED') {
+      throw new BadRequestException(
+        'Payroll batch is disbursing but funding reservation is not posted',
+      );
+    }
+    if (items.length === 0) {
+      throw new BadRequestException('Batch has no items to process');
+    }
+    const allowed = new Set([
+      PayrollItemStatus.PENDING,
+      PayrollItemStatus.COMPLETED,
+      PayrollItemStatus.FAILED,
+    ]);
+    const bad = items.filter((i) => !allowed.has(i.status));
+    if (bad.length > 0) {
+      throw new BadRequestException(
+        'Batch has items in a non-resumable status; resolve or cancel',
+      );
+    }
   }
 
   private assertAccountActive(account: Account, label: string): void {

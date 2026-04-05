@@ -1,6 +1,9 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { JwtAuthGuard } from '../../infrastructure/auth/jwt-auth.guard';
 import { OutboxModule } from '../../infrastructure/outbox/outbox.module';
+import { AuthModule } from '../auth/auth.module';
+import { LedgerModule } from '../ledger/ledger.module';
 import { CreateInternationalTransferHandler } from './command/handlers/create-international-transfer.handler';
 import { LockRateHandler } from './command/handlers/lock-rate.handler';
 import { FxController } from './controller/fx.controller';
@@ -11,14 +14,22 @@ import { FxRateLockRepository } from './repositories/fx-rate-lock.repository';
 import { FxTradeRepository } from './repositories/fx-trade.repository';
 import { FxProviderService } from './service/fx-provider.service';
 import { FxService } from './service/fx.service';
+import { FxLockExpiryCronService } from './service/fx-lock-expiry-cron.service';
+import { FxLockExpirySweepService } from './service/fx-lock-expiry-sweep.service';
 import { InternationalTransferOrchestratorService } from './service/international-transfer-orchestrator.service';
 
 /**
  * FX bounded context — rate discovery, quote locks, and international transfer
- * orchestration. Ledger and payment settlement stay behind their own services.
+ * orchestration. Settlement consumes {@link PostingService} from
+ * {@link LedgerModule} only (no ledger repositories).
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([FxRateLock, FxTrade]), OutboxModule],
+  imports: [
+    TypeOrmModule.forFeature([FxRateLock, FxTrade]),
+    OutboxModule,
+    AuthModule,
+    LedgerModule,
+  ],
   controllers: [FxController],
   providers: [
     FxRateLockRepository,
@@ -26,9 +37,12 @@ import { InternationalTransferOrchestratorService } from './service/internationa
     FxProviderService,
     FxService,
     InternationalTransferOrchestratorService,
+    FxLockExpirySweepService,
+    FxLockExpiryCronService,
     LockRateHandler,
     CreateInternationalTransferHandler,
     GetFxLockByIdHandler,
+    JwtAuthGuard,
   ],
   exports: [
     TypeOrmModule,

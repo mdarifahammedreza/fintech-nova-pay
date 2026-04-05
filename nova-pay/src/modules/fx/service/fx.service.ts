@@ -16,7 +16,8 @@ import { FxRateLockedEvent } from '../events/fx-rate-locked.event';
 import { FxRateLockRepository } from '../repositories/fx-rate-lock.repository';
 import { FxProviderService } from './fx-provider.service';
 
-const DEFAULT_LOCK_TTL_MS = 120_000;
+/** Product default: rate locks expire 60s after creation (`expires_at`). */
+const DEFAULT_LOCK_TTL_MS = 60_000;
 
 export type FxLockStatusView = {
   lockId: string;
@@ -43,7 +44,11 @@ export class FxService {
   ) {}
 
   /**
-   * Acquire a fresh live rate and persist an ACTIVE lock until expiresAt.
+   * Acquire a fresh live rate and persist an ACTIVE lock until `expiresAt`
+   * (`now` + `DEFAULT_LOCK_TTL_MS`, 60s).
+   *
+   * @param userId Authenticated subject (`jwt.sub`); must not come from client
+   * headers or body.
    */
   async lockRate(userId: string, dto: LockRateDto): Promise<{
     lockId: string;
@@ -140,6 +145,8 @@ export class FxService {
 
   /**
    * Read-only status for an authenticated user (no FOR UPDATE).
+   *
+   * @param userId Authenticated subject (`jwt.sub`).
    */
   async getLockStatus(
     userId: string,
@@ -168,6 +175,8 @@ export class FxService {
   /**
    * Validates ownership, ACTIVE, unexpired, and amount match under row lock.
    * Call only inside an open transaction.
+   *
+   * @param userId Authenticated subject (`jwt.sub`); must match `lock.userId`.
    */
   async assertLockConsumableWithLock(
     manager: EntityManager,

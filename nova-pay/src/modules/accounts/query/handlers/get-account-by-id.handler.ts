@@ -8,6 +8,6 @@ export class GetAccountByIdHandler {
   constructor(private readonly accounts: AccountsService) {}
 
   execute(query: GetAccountByIdQuery): Promise<Account | null> {
-    return this.accounts.getAccountById(query.id);
+    return this.accounts.getAccountByIdForOwner(query.id, query.callerUserId);
   }
 }

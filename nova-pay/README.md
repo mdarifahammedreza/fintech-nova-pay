@@ -52,12 +52,12 @@ Modular NestJS fintech monolith: PostgreSQL as source of truth, ledger-first mon
 
 ### FX (foreign exchange)
 
-- **Rate lock:** live quote from provider (mock mode via env), persisted `FxRateLock` with TTL; **outbox** `fx.rate.locked` in the same transaction as insert.
-- **International transfer:** consumes lock under row lock, creates `FxTrade`, emits **outbox** `fx.trade.executed` and `fx.international_transfer.created` in the same transaction (ledger/payment hooks documented as future `PostingService` / payment orchestration integration).
+- **Rate lock:** live quote from provider (mock mode via env), persisted `FxRateLock` with a canonical **60-second** TTL from creation (`expiresAt`); **outbox** `fx.rate.locked` in the same transaction as insert.
+- **International transfer:** consumes an ACTIVE lock before its `expiresAt`, creates `FxTrade`, posts ledger settlement via `PostingService` in the same DB transaction, and emits **outbox** `fx.trade.executed` and `fx.international_transfer.created`.
 - CQRS-style commands/queries and thin `FxController`:
   - `POST /fx/lock-rate`
   - `GET /fx/lock/:id`
-  - `POST /transfers/international` (requires `X-User-Id`, `Idempotency-Key` matching body)
+  - `POST /transfers/international` (JWT + `Idempotency-Key` matching body)
 - Domain event classes for future/async flows: `FxRateLockedEvent`, `FxRateLockExpiredEvent`, `FxTradeExecutedEvent`, `InternationalTransferCreatedEvent`.
 
 ### Payroll

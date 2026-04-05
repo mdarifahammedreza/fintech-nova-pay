@@ -8,6 +8,9 @@ export class GetUserAccountsHandler {
   constructor(private readonly accounts: AccountsService) {}
 
   execute(query: GetUserAccountsQuery): Promise<Account[]> {
-    return this.accounts.getUserAccounts(query.userId);
+    return this.accounts.getUserAccountsForCaller(
+      query.userId,
+      query.callerUserId,
+    );
   }
 }

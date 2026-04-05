@@ -24,6 +24,7 @@ class FxDistinctCurrenciesConstraint implements ValidatorConstraintInterface {
 
 /**
  * Request body to obtain a time-bounded FX quote lock (no ledger movement).
+ * The server sets lock expiry to **60 seconds** after the row is created.
  */
 export class LockRateDto {
   @ApiProperty({ enum: Currency, example: Currency.USD })

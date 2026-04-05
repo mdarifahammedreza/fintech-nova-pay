@@ -7,6 +7,8 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
+  Req,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -18,6 +20,11 @@ import {
   ApiQuery,
   ApiTags,
 } from '@nestjs/swagger';
+import type { Request } from 'express';
+import {
+  JwtAuthGuard,
+  type JwtRequestUser,
+} from '../../../infrastructure/auth/jwt-auth.guard';
 import { CreateAccountHandler } from '../command/handlers/create-account.handler';
 import { CreateAccountCommand } from '../command/impl/create-account.command';
 import { CreateAccountDto } from '../dto/create-account.dto';
@@ -77,13 +84,16 @@ function toAccountResponse(account: Account): AccountResponseDto {
   };
 }
 
+type AuthedRequest = Request & { user: JwtRequestUser };
+
 /**
  * HTTP surface for the accounts bounded context.
- * TODO: `JwtAuthGuard` + ownership / admin checks when auth is enforced.
+ * JWT required. Read routes enforce `account.userId === jwt.sub` server-side.
  */
 @Controller('accounts')
 @ApiTags('accounts')
 @ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
 export class AccountsController {
   constructor(
     private readonly createAccountHandler: CreateAccountHandler,
@@ -110,9 +120,10 @@ export class AccountsController {
   @ApiOkResponse({ type: AccountResponseDto, isArray: true })
   async listByUser(
     @Query('userId', ParseUUIDPipe) userId: string,
+    @Req() req: AuthedRequest,
   ): Promise<AccountResponseDto[]> {
     const rows = await this.getUserAccountsHandler.execute(
-      new GetUserAccountsQuery(userId),
+      new GetUserAccountsQuery(userId, req.user.sub),
     );
     return rows.map(toAccountResponse);
   }
@@ -123,9 +134,10 @@ export class AccountsController {
   @ApiOkResponse({ type: AccountResponseDto })
   async getById(
     @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: AuthedRequest,
   ): Promise<AccountResponseDto> {
     const account = await this.getAccountByIdHandler.execute(
-      new GetAccountByIdQuery(id),
+      new GetAccountByIdQuery(id, req.user.sub),
     );
     if (!account) {
       throw new NotFoundException('Account not found');

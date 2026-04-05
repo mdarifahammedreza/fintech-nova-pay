@@ -1,6 +1,10 @@
 /**
- * Read-side query: all accounts owned by a user (`userId` = `users.id`).
+ * Read-side query: list accounts for `userId` only when it matches the caller
+ * (`callerUserId` = JWT `sub`).
  */
 export class GetUserAccountsQuery {
-  constructor(public readonly userId: string) {}
+  constructor(
+    public readonly userId: string,
+    public readonly callerUserId: string,
+  ) {}
 }

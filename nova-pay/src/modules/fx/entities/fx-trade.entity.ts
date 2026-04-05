@@ -16,7 +16,8 @@ import { FxRateLock } from './fx-rate-lock.entity';
 
 /**
  * Materialized FX conversion tied to exactly one FxRateLock (unique
- * rate_lock_id). FX-owned; does not post ledger entries.
+ * rate_lock_id). FX-owned row; ledger settlement is applied in the same DB
+ * transaction as lock consumption when using international transfer flow.
  */
 @Entity({ name: 'fx_trades' })
 @Unique('UQ_fx_trades_rate_lock_id', ['rateLockId'])

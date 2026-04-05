@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -15,6 +16,10 @@ import { OutboxRepository } from '../../../infrastructure/outbox/outbox.reposito
 import { OutboxRoutingKey } from '../../../infrastructure/outbox/outbox-routing-key.enum';
 import { Account } from '../../accounts/entities/account.entity';
 import { AccountStatus } from '../../accounts/enums/account-status.enum';
+import { RiskDecision } from '../../fraud/entities/risk-decision.entity';
+import { FraudDecisionState } from '../../fraud/enums/fraud-decision-state.enum';
+import { FraudEvaluationContext } from '../../fraud/interfaces/fraud-evaluation-context.interface';
+import { FraudService } from '../../fraud/service/fraud.service';
 import { PostLedgerTransactionDto } from '../../ledger/dto/post-ledger-transaction.dto';
 import { LedgerEntryType } from '../../ledger/enums/ledger-entry-type.enum';
 import { LedgerTransactionType } from '../../ledger/enums/ledger-transaction-type.enum';
@@ -30,15 +35,19 @@ import { PaymentType } from '../enums/payment-type.enum';
 import { IdempotencyRecordRepository } from '../repositories/idempotency-record.repository';
 
 /**
- * Coordinates payment intent → locked account checks → ledger post → payment
- * outcome in one `DataSource.transaction`, using {@link PostingService},
- * {@link OutboxRepository}, and {@link IdempotencyRecordRepository}.
+ * Coordinates payment intent in one `DataSource.transaction`: idempotency slot,
+ * locked account validation, synchronous fraud, optional `PROCESSING` + ledger
+ * post, then terminal payment + idempotency + outbox. Uses {@link PostingService},
+ * {@link FraudService}, {@link OutboxRepository}, and
+ * {@link IdempotencyRecordRepository}.
  *
  * ## Money-path transaction (NovaPay architecture)
  *
- * `submitPayment` runs idempotency resolution, payment `PROCESSING`, ledger post
- * (header + entries + account projections), and terminal payment + idempotency
- * updates in **one** PostgreSQL transaction via `DataSource.transaction`.
+ * `submitPayment` runs idempotency resolution, locked account validation,
+ * synchronous fraud (via {@link FraudService.evaluateSynchronously} — its own
+ * DB transaction for risk rows + fraud outbox), then payment `PROCESSING`,
+ * ledger post (header + entries + account projections), and terminal payment +
+ * idempotency updates in **one** payment PostgreSQL transaction.
  *
  * **Idempotency:** `resolveIdempotencySlot` uses `FOR UPDATE` + DB unique on
  * `(idempotency_key, scope_key)` under the same `EntityManager`; races reload
@@ -47,7 +56,10 @@ import { IdempotencyRecordRepository } from '../repositories/idempotency-record.
  * **Accounts:** source and destination are loaded with `FOR UPDATE` (sorted by
  * id, same order as ledger balance validation) before status/currency checks.
  *
- * TODO: **Fraud** — synchronous policy checks before ledger with locks held.
+ * **Fraud:** after `FOR UPDATE` account rows and readiness checks, before
+ * `PROCESSING` and ledger. `BLOCKED`, `REVIEW`, and `ACTION_REQUIRED` end the
+ * path with terminal `FAILED` + `payment.failed` (fraud context in payload);
+ * only `APPROVED` reaches ledger — no silent step-up.
  *
  * Outbox: persists `payment.created` (first materialize), `payment.completed` /
  * `payment.failed` (terminal), and ledger rows from {@link PostingService}, all
@@ -55,9 +67,10 @@ import { IdempotencyRecordRepository } from '../repositories/idempotency-record.
  * RabbitMQ publish and consumer handling are separate (at-least-once; dedupe in
  * consumers per architecture).
  *
- * **Failure path:** after a ledger error, FAILED rows and `payment.failed`
- * outbox are persisted and the callback **returns** the payment (no `throw`) so
- * the transaction commits; callers map `FAILED` to HTTP.
+ * **Failure path:** fraud decline or ledger error → FAILED payment + FAILED
+ * idempotency + `payment.failed` outbox in the same transaction; callback
+ * **returns** the payment (no `throw`) so the transaction commits; callers map
+ * `FAILED` to HTTP.
  */
 @Injectable()
 export class PaymentOrchestratorService {
@@ -67,14 +80,19 @@ export class PaymentOrchestratorService {
     private readonly dataSource: DataSource,
     private readonly idempotencyRepo: IdempotencyRecordRepository,
     private readonly outbox: OutboxRepository,
+    private readonly fraud: FraudService,
   ) {}
 
   /**
-   * Executes an internal money movement backed by a ledger post.
-   * Same idempotency key returns the stored {@link Payment}; once status is
-   * `COMPLETED` or `FAILED`, the ledger path is not run again for that key.
+   * Executes an internal money movement: fraud gate (with account locks held),
+   * then ledger post only when fraud is `APPROVED`.
+   * `actorUserId` is JWT `sub`; the payment’s `sourceAccountId` must belong to
+   * that user before any terminal replay or money path (idempotency preserved).
    */
-  async submitPayment(dto: CreatePaymentDto): Promise<Payment> {
+  async submitPayment(
+    dto: CreatePaymentDto,
+    actorUserId: string,
+  ): Promise<Payment> {
     const scopeKey = dto.idempotencyScopeKey ?? '';
     const fingerprint = fingerprintCreatePayment(dto);
 
@@ -87,6 +105,12 @@ export class PaymentOrchestratorService {
           fingerprint,
         );
 
+      await this.assertPaymentSourceOwnedByActor(
+        manager,
+        payment.sourceAccountId,
+        actorUserId,
+      );
+
       if (payment.status === PaymentStatus.COMPLETED) {
         return payment;
       }
@@ -98,7 +122,28 @@ export class PaymentOrchestratorService {
         manager,
         dto,
       );
+      if (source.userId !== actorUserId) {
+        throw new ForbiddenException(
+          'Source account does not belong to caller',
+        );
+      }
       this.assertAccountsReady(source, dest, dto);
+
+      // After idempotency + `FOR UPDATE` accounts + readiness: sync fraud; only
+      // APPROVED reaches PROCESSING and ledger (non-APPROVED → FAILED + outbox).
+      const riskDecision = await this.fraud.evaluateSynchronously(
+        this.buildFraudEvaluationContext(dto, payment, source, dest),
+      );
+      if (!this.isFraudApprovedForPayment(riskDecision.finalDecision)) {
+        await this.persistTerminalPaymentFailedForFraudDecision(
+          manager,
+          dto,
+          payment,
+          idempotencyRecord,
+          riskDecision,
+        );
+        return manager.save(Payment, payment);
+      }
 
       payment.status = PaymentStatus.PROCESSING;
       await manager.save(Payment, payment);
@@ -272,6 +317,27 @@ export class PaymentOrchestratorService {
   }
 
   /**
+   * Ensures the debit leg account exists and is owned by the authenticated
+   * actor. Runs inside the payment transaction so idempotent replays cannot
+   * observe another user’s outcomes without the same ownership.
+   */
+  private async assertPaymentSourceOwnedByActor(
+    manager: EntityManager,
+    sourceAccountId: string,
+    actorUserId: string,
+  ): Promise<void> {
+    const row = await manager.findOne(Account, { where: { id: sourceAccountId } });
+    if (!row) {
+      throw new NotFoundException('Source account not found');
+    }
+    if (row.userId !== actorUserId) {
+      throw new ForbiddenException(
+        'Source account does not belong to caller',
+      );
+    }
+  }
+
+  /**
    * `FOR UPDATE` on payment legs in **sorted account id** order (matches
    * {@link PostingService} balance validation) to avoid deadlocks. Status and
    * currency checks run only after these locks are held.
@@ -324,6 +390,80 @@ export class PaymentOrchestratorService {
     }
   }
 
+  /**
+   * Only {@link FraudDecisionState.APPROVED} may continue to `PROCESSING` and
+   * ledger. `BLOCKED`, `REVIEW`, and `ACTION_REQUIRED` do not proceed (no
+   * step-up on this path); any unknown state fails closed. Retries return the
+   * stored `FAILED` payment.
+   */
+  private isFraudApprovedForPayment(
+    finalDecision: FraudDecisionState,
+  ): boolean {
+    switch (finalDecision) {
+      case FraudDecisionState.APPROVED:
+        return true;
+      case FraudDecisionState.BLOCKED:
+      case FraudDecisionState.REVIEW:
+      case FraudDecisionState.ACTION_REQUIRED:
+        return false;
+    }
+  }
+
+  /**
+   * Terminal payment failure in the orchestrator transaction: no ledger call.
+   * Idempotency is `FAILED` so replays return the same outcome without
+   * re-moving money.
+   */
+  private async persistTerminalPaymentFailedForFraudDecision(
+    manager: EntityManager,
+    dto: CreatePaymentDto,
+    payment: Payment,
+    idempotencyRecord: IdempotencyRecord,
+    riskDecision: RiskDecision,
+  ): Promise<void> {
+    payment.status = PaymentStatus.FAILED;
+    idempotencyRecord.status = IdempotencyRecordStatus.FAILED;
+    await manager.save(IdempotencyRecord, idempotencyRecord);
+    await this.outbox.enqueueInTransaction(manager, {
+      routingKey: OutboxRoutingKey.PAYMENT_FAILED,
+      correlationId: payment.correlationId ?? dto.correlationId ?? null,
+      occurredAt: new Date(),
+      payload: this.paymentFailedOutboxPayloadWithFraud(
+        payment,
+        riskDecision,
+      ),
+    });
+  }
+
+  private paymentFailedOutboxPayloadWithFraud(
+    payment: Payment,
+    riskDecision: RiskDecision,
+  ): Record<string, unknown> {
+    return {
+      paymentId: payment.id,
+      reference: payment.reference,
+      amount: payment.amount,
+      currency: payment.currency,
+      type: payment.type,
+      reason: this.fraudDeclineReason(riskDecision),
+      fraud: {
+        riskDecisionId: riskDecision.id,
+        finalDecision: riskDecision.finalDecision,
+        finalReasons: [...(riskDecision.finalReasons ?? [])],
+        triggeredRuleTypes: [...(riskDecision.triggeredRuleTypes ?? [])],
+        correlationId: riskDecision.correlationId,
+      },
+    };
+  }
+
+  private fraudDeclineReason(decision: RiskDecision): string {
+    const head = decision.finalReasons[0];
+    if (head != null && head.trim() !== '') {
+      return `Fraud ${decision.finalDecision}: ${head}`;
+    }
+    return `Fraud ${decision.finalDecision}`;
+  }
+
   private buildLedgerPostDto(
     dto: CreatePaymentDto,
     paymentId: string,
@@ -347,6 +487,40 @@ export class PaymentOrchestratorService {
       correlationId: `payment:${paymentId}`,
       memo: dto.memo ?? `payment:${paymentId}`,
       entries,
+    };
+  }
+
+  /**
+   * Builds {@link FraudEvaluationContext} for {@link FraudService.evaluateSynchronously}
+   * after account `FOR UPDATE` rows and readiness checks, before `PROCESSING`.
+   * `userId` is the source account owner; recipient/sender mirror
+   * {@link EvaluateFraudDto} leg semantics.
+   */
+  private buildFraudEvaluationContext(
+    dto: CreatePaymentDto,
+    payment: Payment,
+    source: Account,
+    dest: Account,
+  ): FraudEvaluationContext {
+    const correlationRaw =
+      payment.correlationId ?? dto.correlationId ?? payment.reference;
+    const correlationId =
+      correlationRaw != null && correlationRaw.trim() !== ''
+        ? correlationRaw.trim()
+        : payment.id;
+    return {
+      userId: source.userId,
+      sourceAccountId: source.id,
+      destinationAccountId: dest.id,
+      recipientAccountId: dest.id,
+      senderAccountId: source.id,
+      amount: payment.amount,
+      currency: payment.currency,
+      paymentReference: payment.reference,
+      correlationId,
+      deviceId: null,
+      deviceFingerprint: null,
+      transactionTimestamp: new Date(),
     };
   }
 }

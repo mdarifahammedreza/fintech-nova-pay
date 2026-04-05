@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -84,6 +85,38 @@ export class AccountsService {
 
   getAccountById(id: string): Promise<Account | null> {
     return this.accounts.findOneBy({ id });
+  }
+
+  /**
+   * HTTP read: same as {@link getAccountById} but only when `userId` matches
+   * `ownerUserId`. Missing row → `null`; wrong owner → 403 (no admin bypass).
+   */
+  async getAccountByIdForOwner(
+    id: string,
+    ownerUserId: string,
+  ): Promise<Account | null> {
+    const account = await this.getAccountById(id);
+    if (!account) {
+      return null;
+    }
+    if (account.userId !== ownerUserId) {
+      throw new ForbiddenException('Account not accessible');
+    }
+    return account;
+  }
+
+  /**
+   * HTTP list: returns accounts for `requestedUserId` only if it equals the
+   * authenticated user (`callerUserId`).
+   */
+  async getUserAccountsForCaller(
+    requestedUserId: string,
+    callerUserId: string,
+  ): Promise<Account[]> {
+    if (requestedUserId !== callerUserId) {
+      throw new ForbiddenException('Cannot list accounts for another user');
+    }
+    return this.getUserAccounts(callerUserId);
   }
 
   async requireAccountById(id: string): Promise<Account> {

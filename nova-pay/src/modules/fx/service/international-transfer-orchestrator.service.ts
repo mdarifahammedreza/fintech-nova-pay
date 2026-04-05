@@ -3,10 +3,16 @@ import {
   ConflictException,
   Injectable,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { OutboxRepository } from '../../../infrastructure/outbox/outbox.repository';
 import { OutboxRoutingKey } from '../../../infrastructure/outbox/outbox-routing-key.enum';
+import { Currency } from '../../accounts/enums/currency.enum';
+import { PostLedgerTransactionDto } from '../../ledger/dto/post-ledger-transaction.dto';
+import { LedgerEntryType } from '../../ledger/enums/ledger-entry-type.enum';
+import { LedgerTransactionType } from '../../ledger/enums/ledger-transaction-type.enum';
+import { PostingService } from '../../ledger/service/posting.service';
 import { CreateInternationalTransferDto } from '../dto/create-international-transfer.dto';
 import { FxRateLock } from '../entities/fx-rate-lock.entity';
 import { FxTrade } from '../entities/fx-trade.entity';
@@ -29,11 +35,37 @@ function multiplySourceByRateToTargetAmount(
   return (a * r).toFixed(fractionDigits);
 }
 
+const LEDGER_MEMO_MAX = 512;
+
+/** Serialized metadata on the ledger header `memo` (varchar cap). */
+function buildFxLedgerMemo(
+  trade: FxTrade,
+  lock: FxRateLock,
+  dto: CreateInternationalTransferDto,
+): string {
+  const payload = {
+    fxTradeId: trade.id,
+    rateLockId: lock.id,
+    executedRate: trade.executedRate,
+    reference: dto.reference,
+    idempotencyKey: dto.idempotencyKey,
+  };
+  const s = JSON.stringify(payload);
+  return s.length <= LEDGER_MEMO_MAX
+    ? s
+    : `${s.slice(0, LEDGER_MEMO_MAX - 3)}...`;
+}
+
 /**
- * Consumes a rate lock and materializes an {@link FxTrade} in the same DB
- * transaction. Payments and ledger are invoked only via their public services
- * (see TODOs below); this module does not touch payment or ledger tables
- * directly.
+ * International transfer orchestration: one PostgreSQL transaction for lock
+ * consumption, trade row, ledger settlement, account projections, and outbox.
+ *
+ * Ledger: {@link PostingService.postWithSharedManager} posts
+ * {@link LedgerTransactionType.FX_CONVERSION} (four legs: customer source,
+ * house settlement per currency, customer destination). {@link PostingService}
+ * also enqueues `ledger.transaction.posted` in that same transaction.
+ *
+ * Settlement account UUIDs: `FX_SETTLEMENT_ACCOUNT_<CURRENCY>` per leg currency.
  */
 @Injectable()
 export class InternationalTransferOrchestratorService {
@@ -41,12 +73,21 @@ export class InternationalTransferOrchestratorService {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly fxService: FxService,
+    private readonly posting: PostingService,
     private readonly outbox: OutboxRepository,
+    private readonly config: ConfigService,
   ) {}
 
   /**
-   * One lock yields at most one trade row (DB unique on rate_lock_id). Lock is
-   * marked CONSUMED with executedRate equal to lockedRate on the trade row.
+   * **Order (single TX):** validate lock under row lock → reject duplicate trade
+   * for `rate_lock_id` → set lock `CONSUMED` → insert {@link FxTrade} as
+   * `PENDING` → post FX ledger bundle (`correlationId` `fx:tr:<tradeId>`,
+   * memo JSON with trade/lock/rate refs) → set trade `COMPLETED` → enqueue
+   * `fx.trade.executed` and `fx.international_transfer.created`. Any failure
+   * rolls back the whole flow including ledger lines and projections.
+   *
+   * @param userId Authenticated subject (`jwt.sub`); must own the lock
+   * ({@link FxService.assertLockConsumableWithLock}).
    */
   async executeInternationalTransfer(
     userId: string,
@@ -89,6 +130,46 @@ export class InternationalTransferOrchestratorService {
         providerReference: lock.providerReference,
         status: FxTradeStatus.PENDING,
       });
+      await manager.save(trade);
+
+      const sourceSettlementId = this.settlementAccountId(lock.sourceCurrency);
+      const targetSettlementId = this.settlementAccountId(lock.targetCurrency);
+
+      const ledgerDto: PostLedgerTransactionDto = {
+        type: LedgerTransactionType.FX_CONVERSION,
+        correlationId: `fx:tr:${trade.id}`,
+        memo: buildFxLedgerMemo(trade, lock, dto),
+        entries: [
+          {
+            accountId: dto.sourceAccountId,
+            entryType: LedgerEntryType.DEBIT,
+            amount: dto.amount,
+            currency: lock.sourceCurrency,
+          },
+          {
+            accountId: sourceSettlementId,
+            entryType: LedgerEntryType.CREDIT,
+            amount: dto.amount,
+            currency: lock.sourceCurrency,
+          },
+          {
+            accountId: targetSettlementId,
+            entryType: LedgerEntryType.DEBIT,
+            amount: targetAmount,
+            currency: lock.targetCurrency,
+          },
+          {
+            accountId: dto.destinationAccountId,
+            entryType: LedgerEntryType.CREDIT,
+            amount: targetAmount,
+            currency: lock.targetCurrency,
+          },
+        ],
+      };
+
+      await this.posting.postWithSharedManager(manager, ledgerDto);
+
+      trade.status = FxTradeStatus.COMPLETED;
       await manager.save(trade);
 
       const occurredAt = new Date();
@@ -141,16 +222,19 @@ export class InternationalTransferOrchestratorService {
         payload: intlEvt.toJSON(),
       });
 
-      // TODO: Call PostingService.postWithSharedManager(manager, ledgerDto) with
-      // entries spanning source/destination accounts and currencies; set
-      // ledgerDto.memo (or future metadata JSON) to include trade.id and
-      // executedRate so cross-currency postings audit to the same locked rate.
-      // TODO: Call PaymentOrchestratorService.submitPayment when a Payment row
-      // must be created with idempotency from dto.idempotencyKey; today
-      // submitPayment opens its own transaction, so either extend payments with
-      // a shared-manager entry point or run payment after this TX commits.
-
       return { trade };
     });
+  }
+
+  /** House account id for the given currency leg (env `FX_SETTLEMENT_ACCOUNT_*`). */
+  private settlementAccountId(currency: Currency): string {
+    const key = `FX_SETTLEMENT_ACCOUNT_${currency}`;
+    const raw = this.config.get<string>(key);
+    if (raw == null || raw.trim() === '') {
+      throw new BadRequestException(
+        `FX ledger settlement is not configured (${key})`,
+      );
+    }
+    return raw.trim();
   }
 }

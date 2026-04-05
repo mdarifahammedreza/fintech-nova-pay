@@ -11,8 +11,9 @@ import {
 import { FxProvider } from '../enums/fx-provider.enum';
 
 /**
- * Public shape returned after a rate lock is created or refreshed (no DB-only
- * columns such as user_id or provider_reference).
+ * Public shape returned after a rate lock is created (no DB-only columns such
+ * as user_id or provider_reference). Locks use a canonical **60-second** TTL
+ * (`expiresAt` = creation + 60s).
  */
 export class FxLockResponseDto {
   @ApiProperty({
@@ -29,15 +30,21 @@ export class FxLockResponseDto {
   @IsString()
   lockedRate: string;
 
-  @ApiProperty({ type: String, format: 'date-time' })
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    description:
+      'When the lock ceases to be consumable (creation time + 60 seconds)',
+  })
   @Type(() => Date)
   @IsDate()
   expiresAt: Date;
 
   @ApiProperty({
     minimum: 0,
-    example: 295,
-    description: 'Seconds until expiresAt from server evaluation time',
+    example: 52,
+    description:
+      'Seconds until `expiresAt` from server evaluation time (canonical 60s lock TTL)',
   })
   @IsInt()
   @Min(0)

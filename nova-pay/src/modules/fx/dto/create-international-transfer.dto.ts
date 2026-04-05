@@ -68,7 +68,9 @@ export class CreateInternationalTransferDto {
 
   @ApiProperty({
     format: 'uuid',
-    description: 'Active FX rate lock id from lock-rate response',
+    description:
+      'ACTIVE lock id from `POST /fx/lock-rate`; must still be within its 60s TTL ' +
+      '(`expiresAt` not passed)',
   })
   @IsUUID('4')
   rateLockId: string;

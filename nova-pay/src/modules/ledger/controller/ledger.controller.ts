@@ -7,6 +7,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -18,6 +19,8 @@ import {
   ApiProperty,
   ApiTags,
 } from '@nestjs/swagger';
+import { assertIdempotencyKeyMatchesBodyField } from '../../../common/utils/assert-idempotency-key-matches-body-field.util';
+import { JwtAuthGuard } from '../../../infrastructure/auth/jwt-auth.guard';
 import { Currency } from '../../accounts/enums/currency.enum';
 import { PostLedgerTransactionHandler } from '../command/handlers/post-ledger-transaction.handler';
 import { ReverseLedgerTransactionHandler } from '../command/handlers/reverse-ledger-transaction.handler';
@@ -32,7 +35,6 @@ import { LedgerTransactionStatus } from '../enums/ledger-transaction-status.enum
 import { LedgerTransactionType } from '../enums/ledger-transaction-type.enum';
 import { GetLedgerTransactionByIdHandler } from '../query/handlers/get-ledger-transaction-by-id.handler';
 import { GetLedgerTransactionByIdQuery } from '../query/impl/get-ledger-transaction-by-id.query';
-import { assertIdempotencyKeyMatchesBodyField } from '../../../common/utils/assert-idempotency-key-matches-body-field.util';
 
 export class LedgerEntryResponseDto {
   @ApiProperty({ format: 'uuid' })
@@ -122,11 +124,12 @@ function toTransactionResponse(
  * Ledger HTTP surface — postings and reads only. Writes call
  * {@link PostingService.post} / reversal; mutating routes require
  * `Idempotency-Key` = `correlationId` (NovaPay money-API rules).
- * TODO: `JwtAuthGuard` + admin / internal API policy.
+ * JWT required; admin / internal API policy is not enforced here yet.
  */
 @Controller('ledger')
 @ApiTags('ledger')
 @ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
 export class LedgerController {
   constructor(
     private readonly postHandler: PostLedgerTransactionHandler,

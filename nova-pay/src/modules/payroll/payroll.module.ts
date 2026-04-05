@@ -1,9 +1,10 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { JwtAuthGuard } from '../../infrastructure/auth/jwt-auth.guard';
 import { OutboxModule } from '../../infrastructure/outbox/outbox.module';
 import { AccountsModule } from '../accounts/accounts.module';
+import { AuthModule } from '../auth/auth.module';
 import { LedgerModule } from '../ledger/ledger.module';
-import { PaymentsModule } from '../payments/payments.module';
 import { CreatePayrollBatchHandler } from './command/handlers/create-payroll-batch.handler';
 import { ProcessPayrollBatchHandler } from './command/handlers/process-payroll-batch.handler';
 import { PayrollController } from './controller/payroll.controller';
@@ -31,8 +32,8 @@ import { PayrollValidationService } from './service/payroll-validation.service';
     ]),
     OutboxModule,
     AccountsModule,
+    AuthModule,
     LedgerModule,
-    PaymentsModule,
   ],
   controllers: [PayrollController],
   providers: [
@@ -45,6 +46,7 @@ import { PayrollValidationService } from './service/payroll-validation.service';
     CreatePayrollBatchHandler,
     ProcessPayrollBatchHandler,
     GetPayrollBatchByIdHandler,
+    JwtAuthGuard,
   ],
   exports: [PayrollService, PayrollOrchestratorService],
 })

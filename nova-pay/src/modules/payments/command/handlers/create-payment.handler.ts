@@ -14,7 +14,10 @@ export class CreatePaymentHandler {
   ) {}
 
   async execute(command: CreatePaymentCommand): Promise<Payment> {
-    const payment = await this.orchestrator.submitPayment(command.dto);
+    const payment = await this.orchestrator.submitPayment(
+      command.dto,
+      command.actorUserId,
+    );
     if (payment.status === PaymentStatus.FAILED) {
       throw new UnprocessableEntityException({
         error: 'PAYMENT_FAILED',

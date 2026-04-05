@@ -15,7 +15,7 @@ export class PayrollItemCompletedEvent {
     public readonly employeeAccountId: string,
     public readonly batchReference: string,
     public readonly batchCorrelationId: string | null,
-    public readonly paymentId: string,
+    public readonly paymentId: string | null,
     public readonly ledgerTransactionId: string | null,
     public readonly amount: string,
     public readonly currency: Currency,

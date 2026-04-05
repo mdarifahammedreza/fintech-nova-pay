@@ -9,6 +9,8 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
+  Req,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -21,6 +23,12 @@ import {
   ApiQuery,
   ApiTags,
 } from '@nestjs/swagger';
+import { assertIdempotencyKeyMatchesBodyField } from '../../../common/utils/assert-idempotency-key-matches-body-field.util';
+import type { Request } from 'express';
+import {
+  JwtAuthGuard,
+  type JwtRequestUser,
+} from '../../../infrastructure/auth/jwt-auth.guard';
 import { Currency } from '../../accounts/enums/currency.enum';
 import { CreatePaymentHandler } from '../command/handlers/create-payment.handler';
 import { CreatePaymentCommand } from '../command/impl/create-payment.command';
@@ -32,7 +40,6 @@ import { GetPaymentByIdHandler } from '../query/handlers/get-payment-by-id.handl
 import { GetPaymentByReferenceHandler } from '../query/handlers/get-payment-by-reference.handler';
 import { GetPaymentByIdQuery } from '../query/impl/get-payment-by-id.query';
 import { GetPaymentByReferenceQuery } from '../query/impl/get-payment-by-reference.query';
-import { assertIdempotencyKeyMatchesBodyField } from '../../../common/utils/assert-idempotency-key-matches-body-field.util';
 
 export class PaymentResponseDto {
   @ApiProperty({ format: 'uuid' })
@@ -97,14 +104,18 @@ function toPaymentResponse(p: Payment): PaymentResponseDto {
   };
 }
 
+type AuthedRequest = Request & { user: JwtRequestUser };
+
 /**
  * Payments HTTP surface — writes go through orchestration; reads via
  * {@link PaymentsService} only. No direct balance mutation here.
- * TODO: `JwtAuthGuard` + ownership / limits.
+ * JWT required; create-payment passes `jwt.sub` as actor (ownership enforced in
+ * orchestration).
  */
 @Controller('payments')
 @ApiTags('payments')
 @ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
 export class PaymentsController {
   constructor(
     private readonly createPaymentHandler: CreatePaymentHandler,
@@ -127,6 +138,7 @@ export class PaymentsController {
   async create(
     @Headers('idempotency-key') idempotencyKeyHeader: string | undefined,
     @Body() dto: CreatePaymentDto,
+    @Req() req: AuthedRequest,
   ): Promise<PaymentResponseDto> {
     assertIdempotencyKeyMatchesBodyField(
       idempotencyKeyHeader,
@@ -134,7 +146,7 @@ export class PaymentsController {
       'idempotencyKey',
     );
     const payment = await this.createPaymentHandler.execute(
-      new CreatePaymentCommand(dto),
+      new CreatePaymentCommand(dto, req.user.sub),
     );
     return toPaymentResponse(payment);
   }

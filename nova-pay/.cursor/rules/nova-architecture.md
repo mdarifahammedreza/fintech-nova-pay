@@ -28,7 +28,9 @@ architecture changes.
 6. Fraud uses sync checks before releasing funds; async consumers observe facts
    only.
 7. FX executes only against a valid stored quote with expiry and provider
-   reference.
+   reference. **Rate locks** use a canonical **60-second** TTL from creation
+   (`expires_at`); consumption and settlement must occur before expiry (sweeper
+   marks overdue locks expired).
 8. Critical flows are fully auditable with actor, action, reference, and
    correlation IDs.
 
@@ -202,7 +204,8 @@ These steps must happen in **one** PostgreSQL transaction where applicable.
   `fraud.risk.action_required`, `fraud.risk.review_triggered`
 - Accounts: `account.created`, `account.frozen`, `account.unfrozen`
 - Payroll: `payroll.batch.created` (same TX as batch + line insert)
-- FX: `fx.rate.locked`, `fx.trade.executed`,
+- FX: `fx.rate.locked` (lock row with 60s TTL), `fx.rate.lock.expired`
+  (sweep + status update after TTL), `fx.trade.executed`,
   `fx.international_transfer.created`
 
 ## Coding

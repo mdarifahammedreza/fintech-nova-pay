@@ -1,7 +1,10 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { JwtAuthGuard } from '../../infrastructure/auth/jwt-auth.guard';
 import { OutboxModule } from '../../infrastructure/outbox/outbox.module';
 import { AccountsModule } from '../accounts/accounts.module';
+import { AuthModule } from '../auth/auth.module';
+import { FraudModule } from '../fraud/fraud.module';
 import { LedgerModule } from '../ledger/ledger.module';
 import { CreatePaymentHandler } from './command/handlers/create-payment.handler';
 import { PaymentsController } from './controller/payments.controller';
@@ -22,6 +25,8 @@ import { PaymentsService } from './service/payments.service';
   imports: [
     TypeOrmModule.forFeature([Payment, IdempotencyRecord]),
     AccountsModule,
+    AuthModule,
+    FraudModule,
     LedgerModule,
     OutboxModule,
   ],
@@ -34,6 +39,7 @@ import { PaymentsService } from './service/payments.service';
     CreatePaymentHandler,
     GetPaymentByIdHandler,
     GetPaymentByReferenceHandler,
+    JwtAuthGuard,
   ],
   exports: [PaymentsService, PaymentOrchestratorService],
 })

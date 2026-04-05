@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   Get,
@@ -7,6 +6,8 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Req,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -18,8 +19,12 @@ import {
   ApiProperty,
   ApiTags,
 } from '@nestjs/swagger';
-import { isUUID } from 'class-validator';
 import { assertIdempotencyKeyMatchesBodyField } from '../../../common/utils/assert-idempotency-key-matches-body-field.util';
+import type { Request } from 'express';
+import {
+  JwtAuthGuard,
+  type JwtRequestUser,
+} from '../../../infrastructure/auth/jwt-auth.guard';
 import { Currency } from '../../accounts/enums/currency.enum';
 import { CreateInternationalTransferHandler } from '../command/handlers/create-international-transfer.handler';
 import { LockRateHandler } from '../command/handlers/lock-rate.handler';
@@ -36,16 +41,7 @@ import { GetFxLockByIdHandler } from '../query/handlers/get-fx-lock-by-id.handle
 import { GetFxLockByIdQuery } from '../query/impl/get-fx-lock-by-id.query';
 import type { FxLockStatusView } from '../service/fx.service';
 
-function requireUserIdHeader(value: string | undefined): string {
-  const v = value?.trim();
-  if (!v) {
-    throw new BadRequestException('X-User-Id header is required');
-  }
-  if (!isUUID(v, '4')) {
-    throw new BadRequestException('X-User-Id must be a UUID v4');
-  }
-  return v;
-}
+type AuthedRequest = Request & { user: JwtRequestUser };
 
 export class FxLockStatusResponseDto {
   @ApiProperty({ format: 'uuid' })
@@ -57,13 +53,23 @@ export class FxLockStatusResponseDto {
   @ApiProperty()
   lockedRate: string;
 
-  @ApiProperty({ type: String, format: 'date-time' })
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    description:
+      'Absolute expiry (server time); new locks use a canonical 60s lifetime',
+  })
   expiresAt: Date;
 
   @ApiProperty({ type: String, format: 'date-time', nullable: true })
   consumedAt: Date | null;
 
-  @ApiProperty({ minimum: 0 })
+  @ApiProperty({
+    minimum: 0,
+    example: 52,
+    description:
+      'Seconds until expiresAt from server evaluation time (60s lock TTL)',
+  })
   timeRemainingSeconds: number;
 
   @ApiProperty({ enum: FxProvider })
@@ -145,11 +151,12 @@ function toInternationalTransferResponse(
 
 /**
  * FX HTTP surface: rate locks and international transfer initiation.
- * Caller identity is required via `X-User-Id` until JWT guards attach
- * `req.user.sub` on these routes.
+ * Lock and transfer ownership use JWT `sub` only (`X-User-Id` is not used).
+ * Rate locks use a canonical **60-second** TTL from creation (`expiresAt`).
  */
 @ApiTags('fx')
 @ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
 @Controller()
 export class FxController {
   constructor(
@@ -159,48 +166,53 @@ export class FxController {
   ) {}
 
   @Post('fx/lock-rate')
-  @ApiOperation({ summary: 'Create a time-bounded FX rate lock' })
-  @ApiHeader({
-    name: 'X-User-Id',
-    required: true,
-    description: 'Authenticated user id (UUID v4); must own subsequent transfers',
+  @ApiOperation({
+    summary: 'Create a time-bounded FX rate lock',
+    description:
+      'Persists an ACTIVE lock with `expiresAt` = now + **60 seconds** (canonical ' +
+      'product TTL). Use `rateLockId` on the international transfer before expiry.',
   })
-  @ApiBody({ type: LockRateDto })
+  @ApiBody({
+    type: LockRateDto,
+    description:
+      'Currency pair and source amount; response includes `expiresAt` and ' +
+      '`timeRemainingSeconds` derived from the 60s lock lifetime.',
+  })
   @ApiOkResponse({ type: FxLockResponseDto })
   async lockRate(
-    @Headers('x-user-id') xUserId: string | undefined,
     @Body() dto: LockRateDto,
+    @Req() req: AuthedRequest,
   ): Promise<FxLockResponseDto> {
-    const userId = requireUserIdHeader(xUserId);
-    return this.lockRateHandler.execute(new LockRateCommand(userId, dto));
+    return this.lockRateHandler.execute(
+      new LockRateCommand(req.user.sub, dto),
+    );
   }
 
   @Get('fx/lock/:id')
-  @ApiOperation({ summary: 'Get FX rate lock status by id' })
-  @ApiHeader({
-    name: 'X-User-Id',
-    required: true,
-    description: 'Must match the user who created the lock',
+  @ApiOperation({
+    summary: 'Get FX rate lock status by id',
+    description:
+      'Returns current status and remaining time until `expiresAt` (60s TTL from ' +
+      'lock creation). After expiry the lock is no longer consumable.',
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Lock id' })
   @ApiOkResponse({ type: FxLockStatusResponseDto })
   async getLockById(
-    @Headers('x-user-id') xUserId: string | undefined,
     @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: AuthedRequest,
   ): Promise<FxLockStatusResponseDto> {
-    const userId = requireUserIdHeader(xUserId);
     const view = await this.getFxLockByIdHandler.execute(
-      new GetFxLockByIdQuery(userId, id),
+      new GetFxLockByIdQuery(req.user.sub, id),
     );
     return toFxLockStatusResponse(view);
   }
 
   @Post('transfers/international')
-  @ApiOperation({ summary: 'Execute international transfer from an FX lock' })
-  @ApiHeader({
-    name: 'X-User-Id',
-    required: true,
-    description: 'Must match the lock owner',
+  @ApiOperation({
+    summary: 'Execute international transfer from an FX lock',
+    description:
+      'Consumes an ACTIVE lock that has not passed its `expiresAt` (**60s** after ' +
+      'lock creation). Posts ledger settlement in the same database transaction.',
   })
   @ApiHeader({
     name: 'Idempotency-Key',
@@ -210,18 +222,17 @@ export class FxController {
   @ApiBody({ type: CreateInternationalTransferDto })
   @ApiOkResponse({ type: InternationalTransferResponseDto })
   async createInternationalTransfer(
-    @Headers('x-user-id') xUserId: string | undefined,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body() dto: CreateInternationalTransferDto,
+    @Req() req: AuthedRequest,
   ): Promise<InternationalTransferResponseDto> {
-    const userId = requireUserIdHeader(xUserId);
     assertIdempotencyKeyMatchesBodyField(
       idempotencyKey,
       dto.idempotencyKey,
       'idempotencyKey',
     );
     const { trade } = await this.createInternationalTransferHandler.execute(
-      new CreateInternationalTransferCommand(userId, dto),
+      new CreateInternationalTransferCommand(req.user.sub, dto),
     );
     return toInternationalTransferResponse(trade);
   }

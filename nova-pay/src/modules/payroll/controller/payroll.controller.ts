@@ -7,6 +7,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -18,8 +19,9 @@ import {
   ApiProperty,
   ApiTags,
 } from '@nestjs/swagger';
-import { Currency } from '../../accounts/enums/currency.enum';
 import { assertIdempotencyKeyMatchesBodyField } from '../../../common/utils/assert-idempotency-key-matches-body-field.util';
+import { JwtAuthGuard } from '../../../infrastructure/auth/jwt-auth.guard';
+import { Currency } from '../../accounts/enums/currency.enum';
 import { CreatePayrollBatchHandler } from '../command/handlers/create-payroll-batch.handler';
 import { ProcessPayrollBatchHandler } from '../command/handlers/process-payroll-batch.handler';
 import { CreatePayrollBatchCommand } from '../command/impl/create-payroll-batch.command';
@@ -180,11 +182,12 @@ function toCreateResponse(
 
 /**
  * Payroll HTTP surface — transport only; handlers own use-case wiring.
- * TODO: JwtAuthGuard + employer / operator policy.
+ * JWT required; employer / operator policy is not enforced here yet.
  */
 @Controller('payroll')
 @ApiTags('payroll')
 @ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
 export class PayrollController {
   constructor(
     private readonly createPayrollBatchHandler: CreatePayrollBatchHandler,

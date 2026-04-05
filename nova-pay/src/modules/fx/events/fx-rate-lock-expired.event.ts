@@ -1,6 +1,6 @@
 import { FxLockStatus } from '../enums/fx-lock-status.enum';
 
-export const FX_RATE_LOCK_EXPIRED_EVENT_NAME = 'fx.rate_lock.expired' as const;
+export const FX_RATE_LOCK_EXPIRED_EVENT_NAME = 'fx.rate.lock.expired' as const;
 
 export type FxRateLockExpiredEventName = typeof FX_RATE_LOCK_EXPIRED_EVENT_NAME;
 

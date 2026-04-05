@@ -1,7 +1,9 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { JwtAuthGuard } from '../../infrastructure/auth/jwt-auth.guard';
 import { OutboxModule } from '../../infrastructure/outbox/outbox.module';
 import { AccountsModule } from '../accounts/accounts.module';
+import { AuthModule } from '../auth/auth.module';
 import { PostLedgerTransactionHandler } from './command/handlers/post-ledger-transaction.handler';
 import { ReverseLedgerTransactionHandler } from './command/handlers/reverse-ledger-transaction.handler';
 import { LedgerController } from './controller/ledger.controller';
@@ -23,6 +25,7 @@ import { ReversalService } from './service/reversal.service';
   imports: [
     TypeOrmModule.forFeature([LedgerTransaction, LedgerEntry]),
     AccountsModule,
+    AuthModule,
     OutboxModule,
   ],
   controllers: [LedgerController],
@@ -35,6 +38,7 @@ import { ReversalService } from './service/reversal.service';
     PostLedgerTransactionHandler,
     ReverseLedgerTransactionHandler,
     GetLedgerTransactionByIdHandler,
+    JwtAuthGuard,
   ],
   exports: [PostingService],
 })

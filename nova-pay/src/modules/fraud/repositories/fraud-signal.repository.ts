@@ -5,8 +5,9 @@ import { BaseRepository } from '../../../infrastructure/database/repositories/ba
 import { FraudSignal } from '../entities/fraud-signal.entity';
 
 /**
- * `fraud_signals` persistence. Writes in the hot path use
- * {@link RiskDecisionRepository.saveWithRuleSignals} for atomicity.
+ * `fraud_signals` persistence. Hot-path inserts run inside
+ * {@link RiskDecisionRepository.saveDecisionAndSignalsInTransaction} under
+ * {@link FraudRuleLogService.persistRiskDecisionAndSignals}.
  */
 @Injectable()
 export class FraudSignalRepository extends BaseRepository<FraudSignal> {

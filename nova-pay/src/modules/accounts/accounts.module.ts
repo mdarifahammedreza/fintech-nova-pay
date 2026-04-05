@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { JwtAuthGuard } from '../../infrastructure/auth/jwt-auth.guard';
 import { OutboxModule } from '../../infrastructure/outbox/outbox.module';
+import { AuthModule } from '../auth/auth.module';
 import { CreateAccountHandler } from './command/handlers/create-account.handler';
 import { AccountsController } from './controller/accounts.controller';
 import { Account } from './entities/account.entity';
@@ -14,7 +16,7 @@ import { AccountsService } from './service/accounts.service';
  * Other modules use exported {@link AccountsService} only (no repo imports).
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Account]), OutboxModule],
+  imports: [TypeOrmModule.forFeature([Account]), OutboxModule, AuthModule],
   controllers: [AccountsController],
   providers: [
     AccountRepository,
@@ -22,6 +24,7 @@ import { AccountsService } from './service/accounts.service';
     CreateAccountHandler,
     GetAccountByIdHandler,
     GetUserAccountsHandler,
+    JwtAuthGuard,
   ],
   exports: [AccountsService],
 })
