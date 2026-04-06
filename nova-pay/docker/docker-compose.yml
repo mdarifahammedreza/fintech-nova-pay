@@ -1,0 +1,103 @@
+# NovaPay — local development (Nest watch + Postgres + Redis + RabbitMQ)
+# Run from repo root: ./run-dev.sh  (or: docker compose -f docker/docker-compose.yml up --build)
+name: nova-pay
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fintech
+      POSTGRES_PASSWORD: change-me-primary-strong
+      POSTGRES_DB: fintech
+    ports:
+      - '5432:5432'
+    volumes:
+      - nova_pay_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U fintech -d fintech']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      # 6380 avoids clashing with a Redis already bound on the host (127.0.0.1:6379)
+      - '6380:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    volumes:
+      - nova_pay_rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: npm run migration:run
+    volumes:
+      - ../:/app
+    environment:
+      DATABASE_WRITE_URL: postgresql://fintech:change-me-primary-strong@postgres:5432/fintech?sslmode=disable
+      TYPEORM_DATASOURCE_USE_DIST: 'false'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - '3002:3002'
+    volumes:
+      - ../:/app
+    environment:
+      NODE_ENV: development
+      PORT: '3002'
+      DATABASE_WRITE_URL: postgresql://fintech:change-me-primary-strong@postgres:5432/fintech?sslmode=disable
+      DATABASE_READ_URL: postgresql://fintech:change-me-primary-strong@postgres:5432/fintech?sslmode=disable
+      DATABASE_SYNCHRONIZE: 'false'
+      DATABASE_LOGGING: 'false'
+      TYPEORM_DATASOURCE_USE_DIST: 'false'
+      JWT_ACCESS_SECRET: change-me-access-secret-use-long-random-string
+      JWT_ACCESS_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_DAYS: '7'
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      RABBITMQ_QUEUE: nova_pay.events
+      RABBITMQ_CONSUMER_QUEUE: nova_pay.consumers
+      RABBITMQ_PREFETCH: '10'
+      OUTBOX_RELAY_ENABLED: 'true'
+      OUTBOX_RELAY_BATCH_SIZE: '50'
+      OUTBOX_STALE_CLAIM_SECONDS: '300'
+      OUTBOX_MARK_PUBLISHED_RETRIES: '5'
+      OUTBOX_MARK_PUBLISHED_RETRY_MS: '100'
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  nova_pay_pgdata:
+  nova_pay_rabbitmq:

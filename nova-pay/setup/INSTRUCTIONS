@@ -1,19 +1,29 @@
 NovaPay — local setup (plain text; extend this file instead of adding new .md)
 
-PostgreSQL (primary + read replicas):
-  From repo root: cd infra/postgres
-  From nova-pay:   cd ../infra/postgres
+All-in-one Docker stack (app + Postgres + Redis + RabbitMQ):
+  From nova-pay repo root:
+    ./run-dev.sh
+  Compose file: docker/docker-compose.yml  ·  image: docker/Dockerfile
+  A one-shot `migrate` service runs `npm run migration:run` after Postgres is healthy,
+  then the API container starts (DATABASE_SYNCHRONIZE=false — schema from migrations only).
+
+Local DB without Docker:
+  export DATABASE_WRITE_URL=postgresql://... && npm run migration:run
+
+Workspace Postgres (primary + replica, optional — use when you need replica ports 5432/5433):
+  From repo root: cd ../infra/postgres
   cp .env.example .env && docker compose up -d
+  Point nova-pay/.env DATABASE_* at those URLs (see infra/postgres README).
 
-App env:
-  Copy nova-pay/.env.example to .env when you add one; set DATABASE_WRITE_URL and
-  DATABASE_READ_URL to match Docker ports (see infra/postgres README).
+App env (non-Docker or custom):
+  Copy nova-pay/.env.example to .env; set DATABASE_WRITE_URL / DATABASE_READ_URL and
+  RABBITMQ_URL / REDIS_URL to match your brokers.
 
-Run API:
-  cd nova-pay && yarn install && yarn start:dev
+Run API without Docker:
+  cd nova-pay && npm ci && npm run start:dev
 
-Swagger:
-  http://localhost:3000/api (default PORT=3000)
+Swagger (default PORT from .env):
+  http://localhost:3002/api (see PORT in .env.example)
 
 Architecture rules for agents:
   .cursor/rules/nova-architecture.md

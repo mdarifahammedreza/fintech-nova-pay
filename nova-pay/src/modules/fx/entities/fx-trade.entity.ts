@@ -12,7 +12,7 @@ import {
 import { Currency } from '../../accounts/enums/currency.enum';
 import { FxProvider } from '../enums/fx-provider.enum';
 import { FxTradeStatus } from '../enums/fx-trade-status.enum';
-import { FxRateLock } from './fx-rate-lock.entity.js';
+import { FxRateLock } from './fx-rate-lock.entity';
 
 /**
  * Materialized FX conversion tied to exactly one FxRateLock (unique
