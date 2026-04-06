@@ -28,6 +28,12 @@ lerna-debug.log*
 .settings/
 *.sublime-workspace
 
+# Local-only (never push)
+/.cursor/
+/AGENTS.md
+/project-plan.md
+/decisions.md
+
 # IDE - VSCode
 .vscode/*
 !.vscode/settings.json

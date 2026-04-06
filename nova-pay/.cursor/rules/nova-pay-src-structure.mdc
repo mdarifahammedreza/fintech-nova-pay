@@ -1,9 +1,0 @@
----
-description: See nova-architecture.md (NestJS src paths)
-globs: nova-pay/**/*.ts
-alwaysApply: false
----
-
-# NovaPay `src/` layout
-
-All mandatory paths, exact module tree, layering, module ownership, repositories, financial transaction boundary, idempotency, and event rules are in **`nova-architecture.md`**. **`global.md`** is always on: do not generate code that violates those rules.
